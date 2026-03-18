@@ -324,19 +324,21 @@ Le Memory Agent n'est plus un outil qu'on lance manuellement. C'est un processus
 ```
 Court terme (< 1 mois)
   ├── LaBSE + GLiNER                     plan V4 — 2 jours
+  ├── Grid search params sur gold         Colab GPU — 1 jour
   ├── SuperDialseg evaluation             plan V4 — 1 jour
   ├── 5-fold CV + variance report         protocole — 1 jour
   └── Decision Engine v0 (règles)         H0 — 1 semaine
 
 Moyen terme (1-3 mois)
-  ├── Annotation manuelle 200 épisodes    H6.a
+  ├── ✅ Dataset gold réel (641 épisodes) H6.a — DÉJÀ FAIT
+  │      11 740 msgs, 15 participants, 943 jours, annotation LLM + humain
+  ├── Bi-encoder fine-tuné sur gold       H2.a — débloqué, 1 session Colab
   ├── Embedding contextuel 5-window       H2.b — CPU
   ├── MLP AttachScore appris              H3.a — CPU
   ├── Recall proactif background          H4.a
-  └── Pipeline incremental               H5.b
+  └── Pipeline incrémental               H5.b
 
 Long terme (3-12 mois)
-  ├── Bi-encoder fine-tuné               H2.a — 1 session Colab (~10€)
   ├── Soft assignment probabiliste        H3.b
   ├── Knowledge Graph sémantique          H4.b
   ├── FAISS à 1M artefacts               H5.a
@@ -345,6 +347,9 @@ Long terme (3-12 mois)
 Vision (12+ mois)
   └── OS de la connaissance personnelle  H8.c
 ```
+
+> **Accélération :** le dataset gold réel (H6.a) était la dépendance bloquante du bi-encoder (H2.a).
+> Il est prêt — H2.a passe de "long terme" à "moyen terme".
 
 ---
 

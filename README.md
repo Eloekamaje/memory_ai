@@ -320,14 +320,14 @@ Court terme (< 1 mois)
   └── Decision Engine v0 (règles)         H0 — 1 semaine
 
 Moyen terme (1-3 mois)
-  ├── Annotation manuelle 200 épisodes    H6.a
+  ├── ✅ Dataset gold réel (641 épisodes) H6.a — DÉJÀ FAIT
+  ├── Bi-encoder fine-tuné sur gold       H2.a — débloqué, 1 session Colab
   ├── Embedding contextuel 5-window       H2.b — CPU
   ├── MLP AttachScore appris              H3.a — CPU
   ├── Recall proactif background          H4.a
   └── Pipeline incrémental               H5.b
 
 Long terme (3-12 mois)
-  ├── Bi-encoder fine-tuné               H2.a — 1 session Colab (~10€)
   ├── Soft assignment probabiliste        H3.b
   ├── Knowledge Graph sémantique          H4.b
   ├── FAISS à 1M artefacts               H5.a
@@ -336,6 +336,8 @@ Long terme (3-12 mois)
 Vision (12+ mois)
   └── OS de la connaissance personnelle  H8.c
 ```
+
+> **Note :** `data/group_gold.json` — 641 épisodes annotés sur 11 740 messages réels (943 jours, 15 participants) — remplace et dépasse H6.a (200 épisodes synthétiques). Le bi-encoder fine-tuné (H2.a) passe de "long terme" à "moyen terme" grâce à ce dataset.
 
 ### Hypothèses de recherche (détail dans `ai-brain/07_visionary_hypotheses.md`)
 

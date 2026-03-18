@@ -1,53 +1,55 @@
-# Memory AI Lab — Colab Setup
+# Memory AI Lab — Workflow Colab
 
-## Workflow
+## Architecture du projet
 
 ```
-VSCode local (toi + Claude)        Google Colab (GPU)
-        │                                  │
-        ├── code + algo                    ├── embeddings (~10 sec GPU)
-        ├── annotation tools              ├── eval ARI
-        └── gold dataset                  └── grid search params
-                    │                          │
-                    └──── Google Drive ────────┘
+GitHub (code)                    Google Drive (données privées)
+  Eloekamaje/memory_ai              memory_ai_data/
+  ├── src/                            ├── group_anon.txt
+  ├── tools/                          ├── group_gold.json
+  ├── ai-brain/                       └── group_embeddings.npy  ← généré auto
+  ├── colab/
+  └── requirements_colab.txt
+              │                                    │
+              └──────────── Colab ─────────────────┘
+                       !git clone + drive.mount
 ```
 
-## 1. Uploader le projet sur Google Drive
+## Workflow quotidien
 
-Dans Drive, créer cette structure :
-```
-Mon Drive/
-  memory_ai_lab/
-    src/          ← copier tout le dossier src/
-    data/
-      group_anon.txt
-      group_gold.json
-    colab/        ← ce dossier
+### Dev local (VSCode + Claude)
+```bash
+# Modifier le code
+# ...
+git add -A
+git commit -m "feat: ..."
+git push
 ```
 
-## 2. Ouvrir un notebook dans Colab
+### Exécution Colab (GPU)
+1. Ouvrir le notebook depuis Drive ou GitHub
+2. Activer GPU : `Exécution > Modifier le type d'exécution > GPU T4`
+3. Run "Tout exécuter" — la cellule 1 fait `git pull` automatiquement
 
-1. Aller sur [colab.research.google.com](https://colab.research.google.com)
-2. `Fichier > Ouvrir > Google Drive` → sélectionner `colab/01_eval_ari.ipynb`
-3. Activer le GPU : `Exécution > Modifier le type d'exécution > GPU T4`
-4. Exécuter les cellules dans l'ordre
+## Upload des données sur Drive (une seule fois)
 
-## 3. Après le premier run
+Dans Google Drive, créer le dossier `memory_ai_data/` et y uploader :
+- `data/group_anon.txt`
+- `data/group_gold.json`
 
-Le fichier `data/group_embeddings.npy` est créé sur Drive.
-Les runs suivants (grid search, etc.) rechargent le cache → **instantané**.
+Le fichier `group_embeddings.npy` sera généré automatiquement au premier run.
 
-## Notebooks disponibles
+## Notebooks
 
 | Notebook | Objectif |
 |---|---|
 | `01_eval_ari.ipynb` | Évaluation ARI V3 sur le gold dataset |
-| *(à venir)* `02_grid_search.ipynb` | Optimisation des paramètres |
-| *(à venir)* `03_labse_swap.ipynb` | Test LaBSE vs all-MiniLM |
+| *(à venir)* `02_labse_swap.ipynb` | Swap all-MiniLM → LaBSE (V4 plan) |
+| *(à venir)* `03_gliner_ner.ipynb` | NER GLiNER vs spaCy |
 
-## Ce qui reste local (VSCode + Claude)
+## Règles
 
-- Écriture du code (`src/`, `tools/`)
-- Annotation LLM (`tools/llm_annotator.py`)
-- Documentation (`ai-brain/`)
-- Tout ce qui ne nécessite pas de GPU
+- **Code** → GitHub (public, pas de données sensibles)
+- **Données** → Drive uniquement (`.gitignore` les exclut)
+- **Embeddings** → Drive (cache, généré par Colab)
+- **Résultats** → noter dans `README.md` et pousser sur GitHub

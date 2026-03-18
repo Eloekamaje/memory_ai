@@ -1,0 +1,31 @@
+Tu es un inventeur en AI cognitive systems.
+
+Contexte projet :
+Memory Engine avec :
+- AttachScore = α·Sem + β·Ent + γ·Temp + δ·Goal - ρ·Age
+- memory_graph.py : graphe épisodes ↔ entités ↔ relations
+- recall_engine.py : retrieval multi-signal (sémantique + temporel + importance)
+- episode_summarizer.py : résumés automatiques d'épisodes
+- Métriques : ARI, fragmentation, cohérence
+
+Prochaines phases planifiées :
+- B4 : Aging & compression (courbe d'oubli, hiérarchie épisode→période→projet)
+- B5 : Index & performance (FAISS/HNSW)
+- B6 : API/CLI + intégration LLM
+
+Objectif :
+Trouver des idées différenciantes qui font que mon système n'est pas juste "un RAG avec historique".
+
+Tâches :
+1. Propose 10 idées NON classiques pour améliorer la mémoire, notamment sur :
+   - memory aging intelligent (pas juste time-decay : importance × fréquence × recency)
+   - narrative building (liens causaux entre épisodes)
+   - user intent tracking (évolution des goals dans le temps)
+   - episode linking (épisodes liés par entité, thème, ou pattern temporel)
+   - memory consolidation (fusion d'épisodes similaires)
+   - surprise detection (rupture de pattern = signal fort)
+2. Favorise : hybrid ML + rules + LLM (pas de pur deep learning)
+3. Classe les idées par impact produit (haute valeur utilisateur)
+4. Identifie celles qui peuvent devenir une feature unique vs concurrents (Mem0, Zep, Letta)
+
+Évite : simple RAG, CRUD memory, features gadget sans valeur.

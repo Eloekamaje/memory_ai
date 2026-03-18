@@ -1,0 +1,23 @@
+# Dépendances minimales pour Google Colab
+# Usage : !pip install -r requirements_colab.txt
+
+# Embeddings
+sentence-transformers>=2.6.0
+
+# NER
+spacy>=3.7.0
+# Modèle français : python -m spacy download fr_core_news_sm
+
+# Métriques & données
+scikit-learn>=1.3.0
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Deep learning (Colab l'a déjà, mais au cas où)
+torch>=2.0.0
+
+# LLM annotation (optionnel)
+anthropic>=0.20.0
+
+# Graphe mémoire (optionnel)
+networkx>=3.0

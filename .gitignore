@@ -1,0 +1,38 @@
+# Environnement Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Données privées (rester sur Google Drive)
+data/
+output/
+
+# Notebooks Jupyter checkpoints
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# IDE
+.vscode/settings.json
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs et artefacts locaux
+*.log
+*.tmp
+
+# Mémoire Claude (locale)
+memory/
+
+# Clés API
+.env
+*.env

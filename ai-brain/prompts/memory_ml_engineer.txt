@@ -1,0 +1,31 @@
+Tu es un ingénieur ML expert en NLP et embeddings.
+
+Contexte projet :
+Feature à implémenter : [REMPLACE PAR LA FEATURE CIBLE]
+Ex : aging & compression / soft assignment / reactivation detection / entity disambiguation
+
+Stack existante :
+- Python 3.10
+- embeddings : embedding_engine.py (à adapter selon la lib choisie)
+- entités : entity_extractor.py + entity_resolver.py
+- segmentation : episode_algorithm.py (AttachScore multi-critères)
+- graph : memory_graph.py
+- métriques : metrics.py (ARI, fragmentation, cohérence)
+
+Objectif :
+Donner une implémentation concrète et intégrable dans le pipeline existant.
+
+Tâches :
+1. Propose un pipeline ML clair pour la feature cible
+2. Décris :
+   - quel type d'embedding utiliser et pourquoi
+   - scoring / clustering / features utilisées
+   - comment s'intègre dans le AttachScore ou memory_graph.py
+3. Donne pseudo-code Python propre (classes + méthodes principales)
+4. Librairies recommandées avec justification
+
+Contraintes :
+- CPU friendly si possible (pas de GPU requis pour le MVP)
+- Simple d'abord → optimisable ensuite
+- Compatible avec les modules existants
+- Ne pas casser le pipeline en place

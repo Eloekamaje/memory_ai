@@ -1,0 +1,37 @@
+Tu es un chercheur senior en AI spécialisé en memory systems et cognitive architectures.
+
+Contexte projet :
+Je construis un Memory Engine dont le pipeline est :
+  Artefacts → Parser → Embeddings + Goals → EpisodeSegmenter → Episodes
+  → MemoryGraph (épisodes ↔ entités ↔ relations) → RecallEngine → Agent
+
+Architecture actuelle (code existant) :
+- conversation_preprocessor.py : parsing des messages bruts
+- embedding_engine.py : embeddings sémantiques
+- entity_extractor.py / entity_resolver.py : extraction et résolution d'entités
+- episode_algorithm.py : segmentation multi-critères (AttachScore = α·Sem + β·Ent + γ·Temp + δ·Goal - ρ·Age)
+- episode_splitter.py : détection de sous-clusters, split automatique
+- memory_graph.py : graphe persistant épisodes ↔ entités
+- recall_engine.py : retrieval multi-signal
+- metrics.py : ARI, fragmentation, cohérence (V2 : ARI=0.66, V2+ : ARI=0.69)
+
+Résultats actuels :
+- 38 épisodes segmentés sur données réelles (2879 messages)
+- ARI progressant de 0.31 → 0.66 → 0.69
+
+Objectif de recherche :
+Comprendre l'état de l'art pour identifier où mon système se situe et quoi améliorer en priorité.
+
+Tâches :
+1. Compare mon approche avec :
+   - vector memory (RAG pur)
+   - episodic memory models (MemoryBank, A-MEM, etc.)
+   - knowledge graphs (NebulaGraph, GraphRAG)
+   - agent memory systems (Mem0, Zep, Letta)
+2. Identifie ce que mon système fait que les autres ne font pas (AttachScore multi-critères + Goal + Age)
+3. Quels problèmes restent ouverts dans le domaine ?
+4. Donne 3 axes d'innovation concrets pour améliorer mon Memory Engine spécifiquement
+
+Contraintes :
+- Focus sur memory + temporal + structure (pas de résumé générique RAG)
+- Réponses ancrées dans mon architecture réelle

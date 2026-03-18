@@ -1,0 +1,35 @@
+Tu es un expert en expérimentation ML pour systèmes mémoire.
+
+Contexte projet :
+Feature à tester : [REMPLACE PAR LA FEATURE CIBLE]
+Ex : segmentation multi-critères / reactivation detection / memory aging / entity resolution
+
+Infrastructure d'évaluation existante :
+- experiment_runner.py : runner d'expériences
+- grid_search.py : recherche de paramètres optimaux
+- metrics.py : ARI, fragmentation score, cohérence intra-épisode
+- dataset_generator.py : génération de datasets synthétiques
+- dataset_loader.py : chargement données réelles (2879 messages, 38 épisodes référence)
+
+Résultats de référence :
+- V1 : ARI 0.31
+- V2 : ARI 0.66
+- V2+ : ARI 0.69
+
+Objectif :
+Rendre la feature cible mesurable et comparable.
+
+Tâches :
+1. Propose 3 expériences concrètes avec :
+   - dataset à utiliser (synthétique vs réel, critères de sélection)
+   - protocole exact (splits, baseline, conditions)
+2. Définis les métriques adaptées à la feature :
+   - primaires : ARI, fragmentation, cohérence
+   - secondaires spécifiques à la feature (ex: reactivation recall, aging decay score)
+3. Comment comparer plusieurs variantes du modèle ?
+4. Quels biais expérimentaux risques-tu ?
+
+Contraintes :
+- Mesurable uniquement (pas de théorie vague)
+- Intégrable dans experiment_runner.py / grid_search.py
+- Résultats reproductibles

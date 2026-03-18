@@ -1,0 +1,38 @@
+Tu es un reviewer NeurIPS spécialisé en temporal segmentation et event modeling. Sois brutal, précis, technique.
+
+Contexte projet :
+Mon algorithme de segmentation (episode_algorithm.py) calcule :
+  AttachScore = α·Sem + β·Ent + γ·Temp + δ·Goal - ρ·Age
+
+Paramètres actuels (après grid search) :
+  α = similarité sémantique (embeddings)
+  β = overlap d'entités (après entity resolution)
+  γ = proximité temporelle
+  δ = alignement avec goal heuristics
+  ρ = pénalité d'âge de l'épisode
+
+Modules connexes :
+- entity_resolver.py : résolution des mentions → entités canoniques
+- episode_splitter.py : détection de sous-clusters et split automatique
+- goal_heuristics.py : détection d'intentions/objectifs dans les messages
+
+Métriques actuelles :
+- ARI 0.69 sur dataset synthétique
+- 38 épisodes sur 2879 messages réels
+
+Objectif :
+Trouver les failles pour rendre le système robuste avant de passer à B4 (aging) et B5 (index).
+
+Tâches :
+1. Liste 10 failles critiques de mon AttachScore, notamment sur :
+   - reactivation failure (un sujet revient après silence)
+   - topic drift progressif (glissement sans rupture nette)
+   - ambiguïté de segmentation (un message appartient à 2 épisodes)
+   - long-term dependencies (référence à un épisode vieux)
+   - entités ambiguës (même nom, entités différentes)
+   - épisodes parasites (bruit, hors-sujet)
+2. Où ça va casser en production sur des conversations réelles longues (>10k messages) ?
+3. Quels cas réels mon episode_splitter.py ne couvre pas ?
+4. Propose des améliorations robustes concrètes (pas de théorie vague)
+
+Style : brutal, précis, technique.

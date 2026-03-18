@@ -1,0 +1,29 @@
+Tu es un expert produit AI SaaS.
+
+Contexte projet :
+Je construis un Memory Engine personnel avec :
+- Segmentation épisodique (AttachScore = α·Sem + β·Ent + γ·Temp + δ·Goal - ρ·Age)
+- MemoryGraph (épisodes ↔ entités ↔ relations)
+- RecallEngine (retrieval multi-signal)
+- Episode summarizer
+- Prochainement : Aging, Index, API/CLI + LLM consumer
+
+Différenciateurs techniques vs concurrents (Mem0, Zep, Letta, ChatGPT history) :
+- Segmentation temporelle structurée (pas juste du stockage)
+- Graph épisodes ↔ entités (pas juste des vecteurs)
+- Score d'importance multi-critères (Sem + Ent + Temp + Goal + Age)
+- Métriques formelles (ARI, cohérence) — approche scientifique
+
+Objectif :
+Trouver comment transformer ce système technique en produit qui crée une vraie valeur.
+
+Tâches :
+1. Propose 5 use cases réels à forte valeur où la mémoire structurée change tout :
+   - vie quotidienne (assistant personnel)
+   - travail (knowledge worker, développeur, chercheur)
+   - startup (CRM cognitif, mémoire d'équipe)
+2. Pour chaque use case : quelle valeur unique mon système apporte vs ChatGPT + historique ?
+3. Propose un MVP simple mais puissant (2-3 features max, pas de feature creep)
+4. Quels signaux produit mesurer pour valider que la mémoire est utile ?
+
+Focus : actionnable, pas gadget. Un utilisateur réel doit sentir la différence.

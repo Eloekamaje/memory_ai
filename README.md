@@ -311,27 +311,47 @@ git add -A && git commit -m "..." && git push
 
 ## Roadmap
 
-### Direction B — Système de mémoire complet (priorité 1)
+```
+Court terme (< 1 mois)
+  ├── LaBSE + GLiNER                     plan V4 — 2 jours
+  ├── Grid search params sur gold         Colab GPU — 1 jour
+  ├── SuperDialseg evaluation             plan V4 — 1 jour
+  ├── 5-fold CV + variance report         protocole — 1 jour
+  └── Decision Engine v0 (règles)         H0 — 1 semaine
 
-| Phase | Objectif | Statut |
-|-------|---------|--------|
-| **B1** Entity Resolution | Jean / Jean Dupont / jdupont@ → même nœud | ✅ Impl. |
-| **B2** Memory Graph | Épisodes ↔ Entités ↔ Relations (networkx) | ✅ Impl. |
-| **B3** Memory Recall | `recall("réunion avec Jean")` → épisodes rankés | ✅ Impl. |
-| **B4** Aging & compression | Ebbinghaus + consolidation nocturne | ✅ Spec. → impl. partielle |
-| **B5** QueryEngine | 5 types de requêtes + introspection | ✅ Spec. |
-| **B6** Decision Engine | Bridge Memory↔Agent (pièce manquante Ivias) | 🔴 À faire |
-| **B7** API & intégration | FastAPI + CLI + LLM consumer | 🔴 À faire |
+Moyen terme (1-3 mois)
+  ├── Annotation manuelle 200 épisodes    H6.a
+  ├── Embedding contextuel 5-window       H2.b — CPU
+  ├── MLP AttachScore appris              H3.a — CPU
+  ├── Recall proactif background          H4.a
+  └── Pipeline incrémental               H5.b
 
-### Direction A — Publication (priorité 2)
+Long terme (3-12 mois)
+  ├── Bi-encoder fine-tuné               H2.a — 1 session Colab (~10€)
+  ├── Soft assignment probabiliste        H3.b
+  ├── Knowledge Graph sémantique          H4.b
+  ├── FAISS à 1M artefacts               H5.a
+  └── Multi-source (email, notes, cal)   H8.a
 
-| Phase | Objectif |
-|-------|---------|
-| **A1** Soft assignment | $P(a \in e_k)$ probabiliste |
-| **A2** Optimisation globale | $\mathcal{L} = \sum Cohesion - \lambda\#Ep$ |
-| **A3** Scission | Détecter deux fils dans un même épisode |
-| **A4** Benchmark | SuperDialseg + Enron + IRC + baselines |
-| **A5** Paper | Workshop AAAI/ACL — personal AI / memory-augmented |
+Vision (12+ mois)
+  └── OS de la connaissance personnelle  H8.c
+```
+
+### Hypothèses de recherche (détail dans `ai-brain/07_visionary_hypotheses.md`)
+
+| ID | Hypothèse | Priorité |
+|----|-----------|:--------:|
+| **H0** | Decision Engine comme pièce manquante Ivias | 🔴 Court terme |
+| **H1** | Goal vectors améliorent la segmentation | 🟡 Moyen |
+| **H2a** | Bi-encoder fine-tuné sur épisodes annotés | 🟡 Long |
+| **H2b** | Embedding contextuel 5-window | 🟢 Moyen |
+| **H3a** | MLP AttachScore appris > heuristique | 🟡 Moyen |
+| **H3b** | Soft assignment probabiliste | 🔴 Long |
+| **H4a** | Recall proactif déclenché par la mémoire | 🟢 Moyen |
+| **H5a** | FAISS → O(log n) à 1M artefacts | 🔴 Long |
+| **H6a** | 200 épisodes annotés → fine-tuning | 🟡 Moyen |
+| **H8a** | Multi-source complet (email+cal+notes) | 🔴 Long |
+| **H8c** | OS cognitif personnel | 🌟 Vision |
 
 ---
 

@@ -1,11 +1,21 @@
 """
-episode_splitter_fast.py — EpisodeSplitter avec silhouette GPU.
+episode_splitter_fast.py — EpisodeSplitter O(n·k) sur GPU/CPU.
 
-Bottleneck identifié : sklearn.silhouette_score = O(n²) CPU.
-Ici on remplace par un calcul de similarité cosinus par bloc sur GPU
-via PyTorch, puis silhouette analytique.
+Remplacement algorithmique du silhouette O(n²) par Calinski-Harabasz O(n·k).
 
-Device-agnostique : fonctionne sur CUDA (éval) et CPU (inference).
+Calinski-Harabasz (Variance Ratio Criterion) :
+    CH(k) = [BGSS / (k-1)] / [WGSS / (n-k)]
+
+    BGSS = Between-Group Sum of Squares  (variance inter-cluster)
+    WGSS = Within-Group Sum of Squares   (variance intra-cluster)
+
+    Complexité : O(n·k) — pas de distances pairwise, pas de matrice n×n.
+    Plus CH est élevé, meilleur est le clustering.
+
+Sur embeddings normalisés (cosinus) : les distances euclidiennes sont
+proportionnelles aux distances cosinus → CH s'applique directement.
+
+Device-agnostique : cuda pour l'éval, cpu pour l'inference.
 """
 
 import numpy as np
@@ -17,69 +27,70 @@ from episode_splitter import EpisodeSplitter, SplitConfig
 from models import Artifact, Episode
 
 
-def _silhouette_cosine_gpu(embeddings: np.ndarray,
+def _calinski_harabasz_gpu(embeddings: np.ndarray,
                            labels: np.ndarray,
                            device: str) -> float:
     """
-    Silhouette score avec distance cosinus, accéléré GPU.
+    Calinski-Harabasz Index — O(n·k), GPU/CPU.
 
-    Complexité : O(n²) en mémoire mais sur GPU → bien plus rapide
-    que sklearn CPU pour n < 5000.
+    Paramètres
+    ----------
+    embeddings : (n, d) float32
+    labels     : (n,)  int — cluster ids 0..k-1
+    device     : 'cuda' ou 'cpu'
 
-    Returns
-    -------
-    silhouette moyen (float) — -1 si calcul impossible
+    Retourne
+    --------
+    score CH (float) — plus élevé = meilleur clustering
+    0.0 si calcul impossible (n == k ou k < 2)
     """
-    n = len(embeddings)
-    if n < 2:
-        return -1.0
+    n, _ = embeddings.shape
+    unique = np.unique(labels)
+    k = len(unique)
 
-    X = torch.from_numpy(embeddings.astype(np.float32)).to(device)
-    X_norm = F.normalize(X, dim=1)                  # (n, d) normalisé
+    if k < 2 or n <= k:
+        return 0.0
 
-    # Distance cosinus = 1 - similarité cosinus
-    cos_sim = X_norm @ X_norm.T                     # (n, n)
-    dist = (1.0 - cos_sim).clamp(min=0.0)           # (n, n)
+    X = F.normalize(
+        torch.from_numpy(embeddings.astype(np.float32)).to(device),
+        dim=1
+    )  # (n, d) — normalisé pour distance cosinus ≡ distance euclidienne
 
-    labels_t = torch.tensor(labels, device=device)
-    unique = labels_t.unique()
-    n_clusters = len(unique)
+    overall_centroid = X.mean(dim=0)  # (d,)
 
-    if n_clusters < 2:
-        return -1.0
+    bgss = torch.tensor(0.0, device=device)  # Between-Group Sum of Squares
+    wgss = torch.tensor(0.0, device=device)  # Within-Group Sum of Squares
 
-    a = torch.zeros(n, device=device)               # dist intra-cluster moyenne
-    b = torch.full((n,), float('inf'), device=device)  # min dist inter-cluster
+    labels_t = torch.from_numpy(labels.astype(np.int64)).to(device)
 
     for lbl in unique:
-        mask = labels_t == lbl
-        cluster_dist = dist[:, mask]                # (n, cluster_size)
-        cluster_size = mask.sum().item()
+        mask = labels_t == int(lbl)
+        cluster = X[mask]          # (nk, d)
+        nk = cluster.shape[0]
 
-        # Intra-cluster : moyenne des distances aux autres membres
-        if cluster_size > 1:
-            a[mask] = cluster_dist[mask].sum(dim=1) / (cluster_size - 1)
-        else:
-            a[mask] = 0.0
+        if nk == 0:
+            continue
 
-        # Inter-cluster : moyenne des distances aux membres de CE cluster
-        inter_mean = cluster_dist[~mask].mean(dim=1)  # (n - cluster_size,)
-        b[~mask] = torch.min(b[~mask], inter_mean)
+        centroid_k = cluster.mean(dim=0)  # (d,)
 
-    # Éviter inf quand un cluster = 1 seul point
-    b = b.clamp(max=2.0)
+        # Inter : nk · ||centroid_k − centroid_global||²
+        bgss = bgss + nk * ((centroid_k - overall_centroid) ** 2).sum()
 
-    denom = torch.max(a, b)
-    s = torch.where(denom > 0, (b - a) / denom, torch.zeros_like(a))
+        # Intra : Σ ||x − centroid_k||²
+        wgss = wgss + ((cluster - centroid_k.unsqueeze(0)) ** 2).sum()
 
-    return float(s.mean().item())
+    if wgss.item() < 1e-10:
+        return 0.0
+
+    ch = (bgss / (k - 1)) / (wgss / (n - k))
+    return float(ch.item())
 
 
 class EpisodeSplitterFast(EpisodeSplitter):
     """
-    EpisodeSplitter avec silhouette GPU.
+    EpisodeSplitter avec Calinski-Harabasz O(n·k) au lieu de silhouette O(n²).
 
-    Même interface que EpisodeSplitter — drop-in replacement.
+    Drop-in replacement — même interface que EpisodeSplitter.
     """
 
     def __init__(self, config: Optional[SplitConfig] = None,
@@ -93,8 +104,11 @@ class EpisodeSplitterFast(EpisodeSplitter):
         self, ep_embeddings: np.ndarray,
     ) -> Tuple[int, np.ndarray, float]:
         """
-        Même logique que EpisodeSplitter._find_best_k mais avec
-        silhouette GPU au lieu de sklearn (O(n²) CPU).
+        Trouve le meilleur k via Calinski-Harabasz O(n·k) sur GPU.
+
+        Retourne (best_k, labels, ch_score_normalisé_en_0_1)
+        pour rester compatible avec l'interface EpisodeSplitter
+        (qui compare le score à silhouette_threshold).
         """
         from sklearn.cluster import AgglomerativeClustering
 
@@ -104,7 +118,8 @@ class EpisodeSplitterFast(EpisodeSplitter):
 
         best_k = 1
         best_labels = np.zeros(n, dtype=int)
-        best_sil = -1.0
+        best_ch = -1.0
+        ch_scores = []
 
         for k in range(2, max_k + 1):
             try:
@@ -117,17 +132,35 @@ class EpisodeSplitterFast(EpisodeSplitter):
 
                 sizes = np.bincount(labels)
                 if np.min(sizes) < self.config.min_sub_size:
+                    ch_scores.append(-1.0)
                     continue
 
-                # Silhouette GPU — remplace sklearn.silhouette_score
-                sil = _silhouette_cosine_gpu(ep_embeddings, labels, self.device)
+                ch = _calinski_harabasz_gpu(ep_embeddings, labels, self.device)
+                ch_scores.append(ch)
 
-                if sil > best_sil:
-                    best_sil = sil
+                if ch > best_ch:
+                    best_ch = ch
                     best_k = k
                     best_labels = labels
 
             except Exception:
+                ch_scores.append(-1.0)
                 continue
 
-        return best_k, best_labels, best_sil
+        # Normalise CH en [0, 1] pour compatibilité avec silhouette_threshold.
+        # CH n'a pas de borne supérieure naturelle → normalisation relative
+        # au maximum observé. Si un seul k valide → ratio = 1.0.
+        if best_ch <= 0:
+            return 1, np.zeros(n, dtype=int), 0.0
+
+        valid = [s for s in ch_scores if s > 0]
+        # Score normalisé : 1.0 si le meilleur k est clairement meilleur
+        # Utilise l'écart relatif entre le best et le 2e meilleur
+        if len(valid) >= 2:
+            sorted_valid = sorted(valid, reverse=True)
+            gap = (sorted_valid[0] - sorted_valid[1]) / (sorted_valid[0] + 1e-8)
+            normalized = gap  # 0..1 — grand gap = split clairement justifié
+        else:
+            normalized = 0.0
+
+        return best_k, best_labels, normalized

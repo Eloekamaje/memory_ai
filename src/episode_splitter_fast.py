@@ -94,11 +94,22 @@ class EpisodeSplitterFast(EpisodeSplitter):
     """
 
     def __init__(self, config: Optional[SplitConfig] = None,
-                 device: Optional[str] = None):
+                 device: Optional[str] = None,
+                 quality_threshold: float = 0.10):
+        """
+        Parameters
+        ----------
+        config            : SplitConfig — silhouette_threshold ignoré ici
+        device            : 'cuda' | 'cpu' | None (auto-détecté)
+        quality_threshold : seuil sur le gap relatif CH normalisé [0, 1].
+                            Un split est validé si (CH_best - CH_2nd) / CH_best
+                            dépasse ce seuil. 0.10 = au moins 10% d'écart.
+        """
         super().__init__(config)
         if device is None:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = device
+        self.quality_threshold = quality_threshold  # remplace silhouette_threshold
 
     def _find_best_k(
         self, ep_embeddings: np.ndarray,
@@ -106,9 +117,8 @@ class EpisodeSplitterFast(EpisodeSplitter):
         """
         Trouve le meilleur k via Calinski-Harabasz O(n·k) sur GPU.
 
-        Retourne (best_k, labels, ch_score_normalisé_en_0_1)
-        pour rester compatible avec l'interface EpisodeSplitter
-        (qui compare le score à silhouette_threshold).
+        Retourne (best_k, labels, gap_relatif_normalisé)
+        Le gap est comparé à self.quality_threshold (pas silhouette_threshold).
         """
         from sklearn.cluster import AgglomerativeClustering
 
@@ -147,9 +157,9 @@ class EpisodeSplitterFast(EpisodeSplitter):
                 ch_scores.append(-1.0)
                 continue
 
-        # Normalise CH en [0, 1] pour compatibilité avec silhouette_threshold.
-        # CH n'a pas de borne supérieure naturelle → normalisation relative
-        # au maximum observé. Si un seul k valide → ratio = 1.0.
+        # Gap relatif normalisé [0, 1] — comparé à self.quality_threshold.
+        # CH n'a pas de borne supérieure → on mesure l'écart relatif
+        # entre le meilleur k et le 2e meilleur : grand écart = split justifié.
         if best_ch <= 0:
             return 1, np.zeros(n, dtype=int), 0.0
 
@@ -164,3 +174,12 @@ class EpisodeSplitterFast(EpisodeSplitter):
             normalized = 0.0
 
         return best_k, best_labels, normalized
+
+    def split(self, episodes, artifacts, embeddings, verbose=False):
+        """Override : utilise quality_threshold au lieu de silhouette_threshold."""
+        # Patch temporaire du config pour que le parent utilise notre seuil
+        original = self.config.silhouette_threshold
+        self.config.silhouette_threshold = self.quality_threshold
+        result = super().split(episodes, artifacts, embeddings, verbose=verbose)
+        self.config.silhouette_threshold = original
+        return result

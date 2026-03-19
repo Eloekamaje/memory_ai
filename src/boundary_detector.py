@@ -249,7 +249,7 @@ class BoundaryDetector:
         print(f'✓ Boundary detector sauvegardé → {path}')
 
     def load(self, path: str) -> 'BoundaryDetector':
-        ckpt = torch.load(path, map_location=self.device)
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(ckpt['state_dict'])
         self.threshold = ckpt['threshold']
         self.model.eval()

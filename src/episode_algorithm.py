@@ -120,7 +120,7 @@ class EpisodeSegmenter:
             episode.centroid.reshape(1, -1)
         )[0][0])
 
-        if episode.centroid_init is not None:
+        if getattr(episode, 'centroid_init', None) is not None:
             sim_init = float(cosine_similarity(
                 embedding.reshape(1, -1),
                 episode.centroid_init.reshape(1, -1)
@@ -490,12 +490,14 @@ class EpisodeSegmenter:
             id=f"EP_{counter:04d}",
             artifact_indices=[index],
             centroid=embedding.copy(),
-            centroid_init=embedding.copy(),   # gelé — identité fondatrice
             goal_centroid=artifact.goal_vector.copy() if artifact.goal_vector is not None else None,
             time_interval=(artifact.timestamp, artifact.timestamp),
             entity_weights={},
             state=EpisodeState.ACTIVE,
         )
+        # centroid_init gelé — défini après construction pour rester
+        # compatible si l'ancienne classe Episode est encore en mémoire
+        new_episode.centroid_init = embedding.copy()
 
         if artifact.entities:
             for entity in artifact.entities:

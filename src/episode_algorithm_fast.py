@@ -68,7 +68,7 @@ class EpisodeSegmenterFast(EpisodeSegmenter):
             for ep in candidates
         ])  # (k, d)
         centroids_init = np.stack([
-            ep.centroid_init if ep.centroid_init is not None
+            getattr(ep, 'centroid_init', None) if getattr(ep, 'centroid_init', None) is not None
             else (ep.centroid if ep.centroid is not None else np.zeros_like(emb))
             for ep in candidates
         ])  # (k, d)

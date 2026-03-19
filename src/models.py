@@ -51,7 +51,8 @@ class Episode:
     artifact_indices: List[int] = field(default_factory=list)
 
     # représentation sémantique
-    centroid: Optional[np.ndarray] = field(default=None, repr=False)
+    centroid: Optional[np.ndarray] = field(default=None, repr=False)       # EMA — dérive avec le temps
+    centroid_init: Optional[np.ndarray] = field(default=None, repr=False)  # gelé au 1er message — identité de l'épisode
     goal_centroid: Optional[np.ndarray] = field(default=None, repr=False)
 
     # entités pondérées  {entité: poids}

@@ -59,21 +59,28 @@ class EpisodeSegmenterFast(EpisodeSegmenter):
         if k == 0:
             return np.array([])
 
-        # ── Semantic similarity ─────────────────────────────────────
-        # (k, d) — empile les centroïdes valides
-        centroids = np.stack([
+        # ── Semantic similarity — dual centroid ─────────────────────
+        # sem = max(sim(emb, centroid_ema), sim(emb, centroid_init))
+        # centroid_ema  : dérive avec l'épisode (contexte récent)
+        # centroid_init : gelé au 1er message (identité fondatrice)
+        centroids_ema = np.stack([
             ep.centroid if ep.centroid is not None else np.zeros_like(emb)
             for ep in candidates
         ])  # (k, d)
+        centroids_init = np.stack([
+            ep.centroid_init if ep.centroid_init is not None
+            else (ep.centroid if ep.centroid is not None else np.zeros_like(emb))
+            for ep in candidates
+        ])  # (k, d)
 
-        emb_t       = torch.from_numpy(emb.astype(np.float32)).to(self.device)        # (d,)
-        centroids_t = torch.from_numpy(centroids.astype(np.float32)).to(self.device)  # (k, d)
+        emb_t          = torch.from_numpy(emb.astype(np.float32)).to(self.device)              # (d,)
+        centroids_ema_t = torch.from_numpy(centroids_ema.astype(np.float32)).to(self.device)   # (k, d)
+        centroids_init_t = torch.from_numpy(centroids_init.astype(np.float32)).to(self.device) # (k, d)
+        emb_exp = emb_t.unsqueeze(0).expand(k, -1)                                             # (k, d)
 
-        sem = F.cosine_similarity(
-            emb_t.unsqueeze(0).expand(k, -1),  # (k, d)
-            centroids_t,                          # (k, d)
-            dim=1
-        ).clamp(min=0.0).cpu().numpy()            # (k,)
+        sim_ema  = F.cosine_similarity(emb_exp, centroids_ema_t,  dim=1).clamp(min=0.0)  # (k,)
+        sim_init = F.cosine_similarity(emb_exp, centroids_init_t, dim=1).clamp(min=0.0)  # (k,)
+        sem = torch.maximum(sim_ema, sim_init).cpu().numpy()                              # (k,)
 
         # Masque : épisodes sans centroïde → sem = 0
         no_centroid = np.array([ep.centroid is None for ep in candidates])

@@ -101,17 +101,33 @@ class EpisodeSegmenter:
 
     def _semantic_similarity(self, embedding: np.ndarray,
                              episode: Episode) -> float:
-        """Similarité cosinus entre l'embedding et le centroïde de l'épisode."""
+        """
+        Similarité cosinus dual-centroid.
 
+        max(sim(emb, centroid_ema), sim(emb, centroid_init))
+
+        centroid_ema  : reflète le contexte récent (dérive avec l'épisode)
+        centroid_init : gelé au 1er message — identité fondatrice de l'épisode
+
+        Un épisode long dont le sujet revient à son origine reste attachable
+        même si son EMA centroid a dérivé vers un sujet intermédiaire.
+        """
         if episode.centroid is None:
             return 0.0
 
-        sim = cosine_similarity(
+        sim_ema = float(cosine_similarity(
             embedding.reshape(1, -1),
             episode.centroid.reshape(1, -1)
-        )[0][0]
+        )[0][0])
 
-        return float(max(sim, 0.0))
+        if episode.centroid_init is not None:
+            sim_init = float(cosine_similarity(
+                embedding.reshape(1, -1),
+                episode.centroid_init.reshape(1, -1)
+            )[0][0])
+            return max(sim_ema, sim_init, 0.0)
+
+        return max(sim_ema, 0.0)
 
     def _entity_overlap(self, artifact: Artifact,
                         episode: Episode) -> float:
@@ -474,6 +490,7 @@ class EpisodeSegmenter:
             id=f"EP_{counter:04d}",
             artifact_indices=[index],
             centroid=embedding.copy(),
+            centroid_init=embedding.copy(),   # gelé — identité fondatrice
             goal_centroid=artifact.goal_vector.copy() if artifact.goal_vector is not None else None,
             time_interval=(artifact.timestamp, artifact.timestamp),
             entity_weights={},

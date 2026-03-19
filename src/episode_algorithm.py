@@ -40,7 +40,10 @@ class EpisodeSegmenter:
                  hard_break_minutes: float = 0,
                  # V3 Challenger fixes
                  ema_alpha: float = 0.80,
-                 active_penalty_hours: float = 24.0):
+                 active_penalty_hours: float = 24.0,
+                 # V4 — création pénalisée (PELT-inspired)
+                 nu: float = 0.0,
+                 nu_window: int = 15):
         """
         Parameters
         ----------
@@ -87,6 +90,9 @@ class EpisodeSegmenter:
         # V3
         self.ema_alpha = ema_alpha
         self.active_penalty_hours = active_penalty_hours
+        # V4 — création pénalisée
+        self.nu = nu
+        self.nu_window = nu_window
 
         # lambda pour la décroissance temporelle exponentielle
         # calibré pour que exp(-λ * time_threshold) ≈ 0.1
@@ -94,6 +100,28 @@ class EpisodeSegmenter:
 
         # statistiques de réactivation (pour analyse)
         self.reactivation_count = 0
+
+    # ------------------------------------------------------------------
+    # Pénalité de création (PELT-inspired)
+    # ------------------------------------------------------------------
+
+    def _creation_threshold(self, episodes: List[Episode]) -> float:
+        """
+        Seuil effectif pour décider de créer un nouvel épisode.
+
+        Plus il y a d'épisodes actifs, plus le seuil d'attachement est bas
+        → on attache davantage → moins de nouveaux épisodes.
+
+        effective_threshold = attach_threshold - nu * min(n_active / nu_window, 1.0)
+
+        nu=0    → comportement original (pas de pénalité)
+        nu=0.1  → seuil abaissé jusqu'à -0.1 quand n_active ≥ nu_window
+        """
+        if self.nu < 1e-9:
+            return self.attach_threshold
+        n_active = sum(1 for ep in episodes if ep.state == EpisodeState.ACTIVE)
+        bonus = self.nu * min(n_active / self.nu_window, 1.0)
+        return self.attach_threshold - bonus
 
     # ------------------------------------------------------------------
     # Composantes du score d'attachement
@@ -469,8 +497,9 @@ class EpisodeSegmenter:
                     best_score = -1.0     # forcer un nouvel épisode
                     best_episode = None
 
-            # décision : rattacher ou créer
-            if best_score >= self.attach_threshold and best_episode is not None:
+            # décision : rattacher ou créer (seuil adaptatif si nu > 0)
+            create_thr = self._creation_threshold(episodes)
+            if best_score >= create_thr and best_episode is not None:
                 self._update_episode(best_episode, artifact, i, emb)
             else:
                 episode_counter += 1

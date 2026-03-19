@@ -162,8 +162,9 @@ class HybridEpisodeSegmenter(EpisodeSegmenterFast):
             self._apply_aging(artifact.timestamp, episodes)
 
             if boundary_mask[i]:
-                # Stage 2 — seuil adaptatif selon confiance Stage 1
-                threshold_eff = self.attach_threshold + self.boundary_k * (1.0 - float(boundary_probs[i]))
+                # Stage 2 — seuil adaptatif selon confiance Stage 1 + pénalité création
+                base_thr = self._creation_threshold(episodes)
+                threshold_eff = base_thr + self.boundary_k * (1.0 - float(boundary_probs[i]))
                 best_ep = self._best_candidate(artifact, emb, episodes, threshold_eff)
                 if best_ep is not None:
                     self._update_episode(best_ep, artifact, i, emb)

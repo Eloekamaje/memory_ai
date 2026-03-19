@@ -172,7 +172,8 @@ class EpisodeSegmenterFast(EpisodeSegmenter):
                     best_score = -1.0
                     best_episode = None
 
-            if best_score >= self.attach_threshold and best_episode is not None:
+            create_thr = self._creation_threshold(episodes)
+            if best_score >= create_thr and best_episode is not None:
                 self._update_episode(best_episode, artifact, i, emb)
             else:
                 episode_counter += 1

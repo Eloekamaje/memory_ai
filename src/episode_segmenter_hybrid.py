@@ -46,23 +46,29 @@ class HybridEpisodeSegmenter(EpisodeSegmenterFast):
     def __init__(self,
                  detector: BoundaryDetector,
                  boundary_k: float = 0.3,
+                 bd_threshold: Optional[float] = None,
                  device: Optional[str] = None,
                  **kwargs):
         """
         Parameters
         ----------
-        detector   : BoundaryDetector entraîné (Stage 1)
-        boundary_k : facteur de calibration probabiliste [0, 1].
-                     0   = seuil fixe (pas de calibration)
-                     0.3 = défaut recommandé
-                     1.0 = calibration maximale
-        device     : 'cuda' | 'cpu' | None (auto)
-        **kwargs   : tous les paramètres de EpisodeSegmenter
-                     (attach_threshold, ema_alpha, dormancy_minutes, …)
+        detector     : BoundaryDetector entraîné (Stage 1)
+        boundary_k   : facteur de calibration probabiliste [0, 1].
+                       0   = seuil fixe (pas de calibration)
+                       0.3 = défaut recommandé
+                       1.0 = calibration maximale
+        bd_threshold : seuil de classification Stage 1 [0, 1].
+                       None = utilise detector.threshold (défaut entraîné).
+                       Tunable par Optuna — permet de co-optimiser précision/rappel
+                       Stage 1 directement sur ARI, sans contrainte MIN_RECALL.
+        device       : 'cuda' | 'cpu' | None (auto)
+        **kwargs     : tous les paramètres de EpisodeSegmenter
+                       (attach_threshold, ema_alpha, dormancy_minutes, …)
         """
         super().__init__(device=device, **kwargs)
-        self.detector   = detector
-        self.boundary_k = boundary_k
+        self.detector     = detector
+        self.boundary_k   = boundary_k
+        self.bd_threshold = bd_threshold  # None → utilise detector.threshold
 
     # ------------------------------------------------------------------
     # Stage 1 — probabilités continues
@@ -81,7 +87,8 @@ class HybridEpisodeSegmenter(EpisodeSegmenterFast):
         X     = extract_features(embeddings, artifacts)
         probs = self.detector.predict_proba(X)           # (n,) float
 
-        mask      = probs >= self.detector.threshold
+        thr   = self.bd_threshold if self.bd_threshold is not None else self.detector.threshold
+        mask  = probs >= thr
         mask[0]   = True
         probs[0]  = 1.0  # premier message — certitude maximale
 
@@ -190,7 +197,7 @@ class HybridEpisodeSegmenter(EpisodeSegmenterFast):
             'n_total':           n_total,
             'n_boundaries':      n_boundaries,
             'boundary_rate':     n_boundaries / max(n_total, 1),
-            'threshold_used':    self.detector.threshold,
+            'threshold_used':    self.bd_threshold if self.bd_threshold is not None else self.detector.threshold,
             'boundary_k':        self.boundary_k,
             'mean_prob':         float(p_at_boundaries.mean()),
             'p25_prob':          float(np.percentile(p_at_boundaries, 25)),

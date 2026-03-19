@@ -6,30 +6,25 @@ Architecture en 3 stages :
     Stage 2 — AttachScore       : identité épisodique (seulement aux frontières)
     Stage 3 — Lifecycle         : EMA, DORMANT, ACTIVE (inchangé)
 
-Gain : ~18x moins d'appels AttachScore vs EpisodeSegmenterFast.
+Calibration probabiliste (boundary_k) :
+    Le seuil de Stage 2 est modulé par la confiance du Stage 1 :
 
-Usage
------
-    from boundary_detector import BoundaryDetector, extract_features, extract_labels
-    from episode_segmenter_hybrid import HybridEpisodeSegmenter
+        threshold_eff = attach_threshold + boundary_k × (1 - P_boundary)
 
-    # 1. Entraîner le boundary detector (sur tune)
-    detector = BoundaryDetector()
-    X_tune = extract_features(emb_tune, arts_tune)
-    y_tune = extract_labels(y_true_tune, len(arts_tune))
-    detector.fit(X_tune, y_tune)
-    detector.optimize_threshold(X_tune, y_tune)
-    detector.save('boundary_detector.pt')
+    P_boundary = 1.0 → threshold normal     (frontière certaine)
+    P_boundary = 0.5 → threshold + k×0.5   (incertain → barre plus haute)
+    P_boundary = 0.3 → threshold + k×0.7   (probable faux positif → difficile de fragmenter)
 
-    # 2. Segmenter (sur n'importe quel corpus)
-    seg = HybridEpisodeSegmenter(detector=detector, **params)
-    episodes = seg.segment(artifacts, embeddings)
+    Cela réduit la sur-fragmentation sans re-tuning et sans dépendre
+    de la distribution des données d'entraînement.
+
+Gain : ~8x moins d'appels AttachScore vs EpisodeSegmenterFast.
 """
 
 from __future__ import annotations
 
 import numpy as np
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from boundary_detector import BoundaryDetector, extract_features
 from episode_algorithm_fast import EpisodeSegmenterFast
@@ -38,130 +33,144 @@ from models import Artifact, Episode
 
 class HybridEpisodeSegmenter(EpisodeSegmenterFast):
     """
-    EpisodeSegmenter hybride en 3 stages.
+    EpisodeSegmenter hybride en 3 stages avec calibration probabiliste.
 
-    Stage 1 : BoundaryDetector filtre O(n) → seules les ~5% frontières
-              détectées passent au Stage 2.
-    Stage 2 : AttachScore vectorisé (hérité de EpisodeSegmenterFast).
-    Stage 3 : Lifecycle (EMA, DORMANT/ACTIVE) — hérité de EpisodeSegmenter.
+    Stage 1 : BoundaryDetector → P(frontière) pour chaque message
+    Stage 2 : AttachScore avec seuil adaptatif selon P(frontière)
+    Stage 3 : Lifecycle (EMA, DORMANT/ACTIVE) — inchangé
 
-    Pour les messages non-frontières : rattachement direct à l'épisode
-    courant, sans aucun calcul de score.
+    Le paramètre `boundary_k` contrôle combien l'incertitude du Stage 1
+    durcit le seuil Stage 2. k=0 = comportement binaire original.
     """
 
     def __init__(self,
                  detector: BoundaryDetector,
+                 boundary_k: float = 0.3,
                  device: Optional[str] = None,
                  **kwargs):
         """
         Parameters
         ----------
-        detector : BoundaryDetector entraîné (Stage 1)
-        device   : 'cuda' | 'cpu' | None (auto)
-        **kwargs : tous les paramètres de EpisodeSegmenter
-                   (attach_threshold, ema_alpha, dormancy_minutes, …)
+        detector   : BoundaryDetector entraîné (Stage 1)
+        boundary_k : facteur de calibration probabiliste [0, 1].
+                     0   = seuil fixe (pas de calibration)
+                     0.3 = défaut recommandé
+                     1.0 = calibration maximale
+        device     : 'cuda' | 'cpu' | None (auto)
+        **kwargs   : tous les paramètres de EpisodeSegmenter
+                     (attach_threshold, ema_alpha, dormancy_minutes, …)
         """
         super().__init__(device=device, **kwargs)
-        self.detector = detector
+        self.detector   = detector
+        self.boundary_k = boundary_k
 
     # ------------------------------------------------------------------
-    # Stage 1 helper
+    # Stage 1 — probabilités continues
     # ------------------------------------------------------------------
 
-    def _predict_boundaries(self,
-                            artifacts: List[Artifact],
-                            embeddings: np.ndarray) -> np.ndarray:
+    def _boundary_probs(self,
+                        artifacts: List[Artifact],
+                        embeddings: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Retourne un masque booléen (n,) : True = frontière détectée.
+        Retourne (mask, probs) :
+            mask  : (n,) bool  — True si message est candidat frontière
+            probs : (n,) float — P(frontière) pour chaque message
 
-        Le premier message est toujours une frontière (crée le 1er épisode).
+        Le premier message est toujours frontière (prob=1.0).
         """
-        X = extract_features(embeddings, artifacts)
-        boundary_indices = self.detector.predict(X)
-        mask = np.zeros(len(artifacts), dtype=bool)
-        mask[boundary_indices] = True
-        mask[0] = True  # premier message toujours frontière
-        return mask
+        X     = extract_features(embeddings, artifacts)
+        probs = self.detector.predict_proba(X)           # (n,) float
+
+        mask      = probs >= self.detector.threshold
+        mask[0]   = True
+        probs[0]  = 1.0  # premier message — certitude maximale
+
+        return mask, probs
 
     # ------------------------------------------------------------------
     # Segment — override principal
     # ------------------------------------------------------------------
 
+    def _best_candidate(self,
+                        artifact: Artifact,
+                        emb: np.ndarray,
+                        episodes: List[Episode],
+                        threshold_eff: float) -> Optional[Episode]:
+        """
+        Retourne l'épisode candidat si son score dépasse threshold_eff, None sinon.
+        Applique aussi le hard break check.
+        """
+        candidates = self._get_candidates(artifact, episodes)
+        if not candidates:
+            return None
+
+        scores     = self._attach_scores_batch(artifact, emb, candidates)
+        best_idx   = int(np.argmax(scores))
+        best_score = float(scores[best_idx])
+        best_ep    = candidates[best_idx]
+
+        if (self.hard_break_minutes is not None
+                and best_ep.time_interval is not None):
+            _, t_end = best_ep.time_interval
+            if artifact.timestamp - t_end > self.hard_break_minutes:
+                return None
+
+        return best_ep if best_score >= threshold_eff else None
+
+    def _new_episode(self,
+                     counter: int,
+                     artifact: Artifact,
+                     idx: int,
+                     emb: np.ndarray,
+                     episodes: List[Episode]) -> Tuple[int, Episode]:
+        """Crée un nouvel épisode et l'enregistre dans l'index."""
+        counter += 1
+        ep = self._create_episode(counter, artifact, idx, emb)
+        episodes.append(ep)
+        self._idx_add(ep)
+        return counter, ep
+
     def segment(self,
                 artifacts: List[Artifact],
                 embeddings: np.ndarray) -> List[Episode]:
         """
-        Segmente le flux en 3 stages.
+        Segmente le flux en 3 stages avec calibration probabiliste.
 
-        Stage 1 : boundaries = BoundaryDetector.predict()  — O(n) batch
-        Stage 2 : pour chaque frontière → AttachScore vectorisé
-        Stage 3 : lifecycle (aging, EMA, DORMANT/ACTIVE) à chaque message
+        Pour chaque message candidat frontière :
+            threshold_eff = attach_threshold + boundary_k × (1 - P_boundary)
+
+        Faux positifs Stage 1 (P faible) → seuil Stage 2 élevé → rattachés
+        à l'épisode existant plutôt que fragmentés inutilement.
         """
         episodes: List[Episode] = []
         episode_counter = 0
         self.reactivation_count = 0
         self._idx_init()
 
-        # ── Stage 1 : toutes les frontières en un seul appel ──────────
-        boundary_mask = self._predict_boundaries(artifacts, embeddings)
-
-        n_boundaries = int(boundary_mask.sum())
-        n_total = len(artifacts)
-
+        boundary_mask, boundary_probs = self._boundary_probs(artifacts, embeddings)
         current_episode: Optional[Episode] = None
 
         for i, artifact in enumerate(artifacts):
             emb = embeddings[i]
-
-            # Lifecycle : aging (toujours appliqué)
             self._apply_aging(artifact.timestamp, episodes)
 
             if boundary_mask[i]:
-                # ── Stage 2 : AttachScore seulement ici ───────────────
-                candidates = self._get_candidates(artifact, episodes)
-
-                if candidates:
-                    scores = self._attach_scores_batch(artifact, emb, candidates)
-                    best_idx   = int(np.argmax(scores))
-                    best_score = float(scores[best_idx])
-                    best_ep    = candidates[best_idx]
-                else:
-                    best_score = -1.0
-                    best_ep    = None
-
-                # hard break check
-                if (best_ep is not None
-                        and self.hard_break_minutes is not None
-                        and best_ep.time_interval is not None):
-                    _, t_end = best_ep.time_interval
-                    if artifact.timestamp - t_end > self.hard_break_minutes:
-                        best_score = -1.0
-                        best_ep    = None
-
-                if best_score >= self.attach_threshold and best_ep is not None:
-                    # Réactivation d'un épisode existant
+                # Stage 2 — seuil adaptatif selon confiance Stage 1
+                threshold_eff = self.attach_threshold + self.boundary_k * (1.0 - float(boundary_probs[i]))
+                best_ep = self._best_candidate(artifact, emb, episodes, threshold_eff)
+                if best_ep is not None:
                     self._update_episode(best_ep, artifact, i, emb)
                     current_episode = best_ep
                 else:
-                    # Nouvel épisode
-                    episode_counter += 1
-                    new_ep = self._create_episode(episode_counter, artifact, i, emb)
-                    episodes.append(new_ep)
-                    self._idx_add(new_ep)
-                    current_episode = new_ep
-
+                    episode_counter, current_episode = self._new_episode(
+                        episode_counter, artifact, i, emb, episodes)
             else:
-                # ── Continuation : rattachement direct (pas de scoring) ─
-                if current_episode is not None:
-                    self._update_episode(current_episode, artifact, i, emb)
+                # Continuation directe — pas de scoring
+                if current_episode is None:
+                    episode_counter, current_episode = self._new_episode(
+                        episode_counter, artifact, i, emb, episodes)
                 else:
-                    # Cas de bord : pas d'épisode courant (ne devrait pas arriver
-                    # car mask[0]=True, mais sécurité)
-                    episode_counter += 1
-                    new_ep = self._create_episode(episode_counter, artifact, i, emb)
-                    episodes.append(new_ep)
-                    self._idx_add(new_ep)
-                    current_episode = new_ep
+                    self._update_episode(current_episode, artifact, i, emb)
 
         return episodes
 
@@ -172,23 +181,19 @@ class HybridEpisodeSegmenter(EpisodeSegmenterFast):
     def boundary_stats(self,
                        artifacts: List[Artifact],
                        embeddings: np.ndarray) -> dict:
-        """
-        Retourne les statistiques du Stage 1 (pour diagnostic).
-
-        Returns
-        -------
-        dict avec :
-            n_total        : nombre total de messages
-            n_boundaries   : frontières détectées
-            boundary_rate  : taux de frontières
-            threshold_used : seuil de classification utilisé
-        """
-        mask = self._predict_boundaries(artifacts, embeddings)
-        n_total = len(artifacts)
+        """Statistiques Stage 1 + calibration pour diagnostic."""
+        mask, probs = self._boundary_probs(artifacts, embeddings)
+        n_total      = len(artifacts)
         n_boundaries = int(mask.sum())
+        p_at_boundaries = probs[mask]
         return {
-            'n_total':       n_total,
-            'n_boundaries':  n_boundaries,
-            'boundary_rate': n_boundaries / max(n_total, 1),
-            'threshold_used': self.detector.threshold,
+            'n_total':           n_total,
+            'n_boundaries':      n_boundaries,
+            'boundary_rate':     n_boundaries / max(n_total, 1),
+            'threshold_used':    self.detector.threshold,
+            'boundary_k':        self.boundary_k,
+            'mean_prob':         float(p_at_boundaries.mean()),
+            'p25_prob':          float(np.percentile(p_at_boundaries, 25)),
+            'effective_thr_p25': self.attach_threshold + self.boundary_k * (1 - float(np.percentile(p_at_boundaries, 25))),
+            'effective_thr_p75': self.attach_threshold + self.boundary_k * (1 - float(np.percentile(p_at_boundaries, 75))),
         }

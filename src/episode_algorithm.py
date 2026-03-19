@@ -43,7 +43,9 @@ class EpisodeSegmenter:
                  active_penalty_hours: float = 24.0,
                  # V4 — création pénalisée (PELT-inspired)
                  nu: float = 0.0,
-                 nu_window: int = 15):
+                 nu_window: int = 15,
+                 # V4 — dual centroid (désactivé par défaut — régression empirique)
+                 use_dual_centroid: bool = False):
         """
         Parameters
         ----------
@@ -93,6 +95,7 @@ class EpisodeSegmenter:
         # V4 — création pénalisée
         self.nu = nu
         self.nu_window = nu_window
+        self.use_dual_centroid = use_dual_centroid
 
         # lambda pour la décroissance temporelle exponentielle
         # calibré pour que exp(-λ * time_threshold) ≈ 0.1
@@ -148,7 +151,7 @@ class EpisodeSegmenter:
             episode.centroid.reshape(1, -1)
         )[0][0])
 
-        if getattr(episode, 'centroid_init', None) is not None:
+        if self.use_dual_centroid and getattr(episode, 'centroid_init', None) is not None:
             sim_init = float(cosine_similarity(
                 embedding.reshape(1, -1),
                 episode.centroid_init.reshape(1, -1)

@@ -67,20 +67,23 @@ class EpisodeSegmenterFast(EpisodeSegmenter):
             ep.centroid if ep.centroid is not None else np.zeros_like(emb)
             for ep in candidates
         ])  # (k, d)
-        centroids_init = np.stack([
-            getattr(ep, 'centroid_init', None) if getattr(ep, 'centroid_init', None) is not None
-            else (ep.centroid if ep.centroid is not None else np.zeros_like(emb))
-            for ep in candidates
-        ])  # (k, d)
+        emb_t           = torch.from_numpy(emb.astype(np.float32)).to(self.device)             # (d,)
+        centroids_ema_t = torch.from_numpy(centroids_ema.astype(np.float32)).to(self.device)  # (k, d)
+        emb_exp = emb_t.unsqueeze(0).expand(k, -1)                                            # (k, d)
 
-        emb_t          = torch.from_numpy(emb.astype(np.float32)).to(self.device)              # (d,)
-        centroids_ema_t = torch.from_numpy(centroids_ema.astype(np.float32)).to(self.device)   # (k, d)
-        centroids_init_t = torch.from_numpy(centroids_init.astype(np.float32)).to(self.device) # (k, d)
-        emb_exp = emb_t.unsqueeze(0).expand(k, -1)                                             # (k, d)
+        sim_ema = F.cosine_similarity(emb_exp, centroids_ema_t, dim=1).clamp(min=0.0)  # (k,)
 
-        sim_ema  = F.cosine_similarity(emb_exp, centroids_ema_t,  dim=1).clamp(min=0.0)  # (k,)
-        sim_init = F.cosine_similarity(emb_exp, centroids_init_t, dim=1).clamp(min=0.0)  # (k,)
-        sem = torch.maximum(sim_ema, sim_init).cpu().numpy()                              # (k,)
+        if self.use_dual_centroid:
+            centroids_init = np.stack([
+                getattr(ep, 'centroid_init', None) if getattr(ep, 'centroid_init', None) is not None
+                else (ep.centroid if ep.centroid is not None else np.zeros_like(emb))
+                for ep in candidates
+            ])  # (k, d)
+            centroids_init_t = torch.from_numpy(centroids_init.astype(np.float32)).to(self.device)
+            sim_init = F.cosine_similarity(emb_exp, centroids_init_t, dim=1).clamp(min=0.0)
+            sem = torch.maximum(sim_ema, sim_init).cpu().numpy()
+        else:
+            sem = sim_ema.cpu().numpy()
 
         # Masque : épisodes sans centroïde → sem = 0
         no_centroid = np.array([ep.centroid is None for ep in candidates])

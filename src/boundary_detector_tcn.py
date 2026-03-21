@@ -43,37 +43,50 @@ from models import Artifact
 # Features (séquence)                                                 #
 # ================================================================== #
 
-INPUT_DIM = 769  # 768 (embedding) + 1 (log1p gap normalisé)
+INPUT_DIM     = 769  # 768 (embedding) + 1 (log1p gap normalisé)
+INPUT_DIM_COS = 770  # + cosine_sim(emb_{t-1}, emb_t)
 
 
 def _sequence_features(embeddings: np.ndarray,
-                        artifacts: List[Artifact]) -> np.ndarray:
+                        artifacts: List[Artifact],
+                        use_cos_sim: bool = False) -> np.ndarray:
     """
     Prépare les features par message pour le TCN.
 
-    Features par message t :
-        emb_t    (768,) : embedding brut — le réseau apprend lui-même le contexte
+    Features par message t (use_cos_sim=False, dim=769) :
+        emb_t    (768,) : embedding brut
         gap_log  (1,)   : log1p(gap_min) / log1p(1440), normalisé par 24h
 
-    Pas de cos_sim pré-calculé — éviter le raccourci "faible sim = frontière"
-    que le MLP actuel a appris (et qui plafonne la précision à 0.47).
+    Features additionnelles (use_cos_sim=True, dim=770) :
+        cos_sim  (1,)   : cosine_sim(emb_{t-1}, emb_t)
+                          Signal de continuité sémantique — le TCN peut
+                          l'utiliser avec nuance, pas comme shortcut seul.
 
     Returns
     -------
-    X : np.ndarray (n, 769)
+    X : np.ndarray (n, 769) ou (n, 770)
     """
     n, d = embeddings.shape
-    X = np.zeros((n, d + 1), dtype=np.float32)
+    n_feat = d + 2 if use_cos_sim else d + 1
+    X = np.zeros((n, n_feat), dtype=np.float32)
     X[:, :d] = embeddings.astype(np.float32)
+
+    if use_cos_sim:
+        norms    = np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8
+        emb_norm = (embeddings / norms).astype(np.float32)
+
     for i in range(n):
         if i == 0:
-            X[i, d] = 1.0  # premier message : gap maximal par convention
+            X[i, d] = 1.0   # gap_log maximal par convention
+            # cos_sim[0] = 0.0 (pas de prédécesseur)
         else:
             gap_min = abs(
                 (artifacts[i].timestamp - artifacts[i - 1].timestamp
                  ).total_seconds() / 60.0
             )
             X[i, d] = float(np.log1p(gap_min) / np.log1p(1440.0))
+            if use_cos_sim:
+                X[i, d + 1] = float(np.dot(emb_norm[i], emb_norm[i - 1]))
     return X
 
 
@@ -286,14 +299,17 @@ class TCNBoundaryDetector:
                  n_blocks:    int   = 3,
                  kernel_size: int   = 3,
                  dropout:     float = 0.15,
-                 window_size: int   = 100):
+                 window_size: int   = 100,
+                 use_cos_sim: bool  = False):
         if device is None:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device      = device
         self.threshold   = threshold
         self.window_size = window_size
+        self.use_cos_sim = use_cos_sim
+        d_input = INPUT_DIM_COS if use_cos_sim else INPUT_DIM
         self.model = TCNModel(
-            d_input=INPUT_DIM,
+            d_input=d_input,
             channels=channels,
             n_blocks=n_blocks,
             kernel_size=kernel_size,
@@ -324,7 +340,7 @@ class TCNBoundaryDetector:
         Loss : Focal Loss (γ=2, pos_weight=n_neg/n_pos).
         """
         n = len(embeddings)
-        features = _sequence_features(embeddings, artifacts)
+        features = _sequence_features(embeddings, artifacts, self.use_cos_sim)
         labels   = extract_boundary_labels(y_true, n)
 
         n_pos = max(int(labels.sum()), 1)
@@ -412,7 +428,7 @@ class TCNBoundaryDetector:
         if n == 0:
             return np.array([], dtype=np.float32)
 
-        features = _sequence_features(embeddings, artifacts)  # (n, 769)
+        features = _sequence_features(embeddings, artifacts, self.use_cos_sim)
         W        = self.window_size
         half     = W // 2
 
@@ -519,19 +535,22 @@ class TCNBoundaryDetector:
     # ------------------------------------------------------------------ #
 
     def save(self, path: str) -> None:
+        d_input = INPUT_DIM_COS if self.use_cos_sim else INPUT_DIM
         torch.save({
             'state_dict':  self.model.state_dict(),
             'threshold':   self.threshold,
             'window_size': self.window_size,
+            'use_cos_sim': self.use_cos_sim,
             'model_cfg': {
-                'd_input':    INPUT_DIM,
+                'd_input':    d_input,
                 'channels':   self.model.proj.out_features,
                 'n_blocks':   len(self.model.blocks),
                 'kernel_size': self.model.blocks[0].branches[0][0].kernel_size[0],
                 'dropout':     self.model.blocks[0].drop.p,
             },
         }, path)
-        print(f'✓ TCN boundary detector sauvegardé → {path}')
+        cos_tag = '+cos_sim' if self.use_cos_sim else ''
+        print(f'✓ TCN boundary detector sauvegardé → {path}  [dim={d_input}{cos_tag}]')
 
     def load(self, path: str) -> 'TCNBoundaryDetector':
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
@@ -541,6 +560,8 @@ class TCNBoundaryDetector:
         self.model.load_state_dict(ckpt['state_dict'])
         self.threshold   = ckpt['threshold']
         self.window_size = ckpt.get('window_size', self.window_size)
+        self.use_cos_sim = ckpt.get('use_cos_sim', False)
         self.model.eval()
-        print(f'✓ TCN boundary detector chargé (seuil={self.threshold:.3f})')
+        cos_tag = '+cos_sim' if self.use_cos_sim else ''
+        print(f'✓ TCN boundary detector chargé (seuil={self.threshold:.3f}{cos_tag})')
         return self

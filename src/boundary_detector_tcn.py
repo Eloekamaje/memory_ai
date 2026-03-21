@@ -484,23 +484,34 @@ class TCNBoundaryDetector:
 
     @torch.no_grad()
     def _eval_f1(self, features: np.ndarray, labels: np.ndarray) -> float:
-        """F1 sur la séquence val (sans sliding window — direct)."""
-        self.model.eval()
-        W = self.window_size
+        """F1 sur la séquence val via sliding window (gère n > window_size)."""
         n = len(features)
+        W = self.window_size
+        half = W // 2
 
-        chunk = np.zeros((W, features.shape[1]), dtype=np.float32)
-        chunk[:n] = features
-        x_t    = torch.from_numpy(chunk[None]).to(self.device)
-        logits = self.model(x_t)[0].cpu().numpy()[:n]
-        probs  = 1 / (1 + np.exp(-logits))
-        preds  = (probs >= 0.5).astype(int)
-        tp     = int(((preds == 1) & (labels == 1)).sum())
-        fp     = int(((preds == 1) & (labels == 0)).sum())
-        fn     = int(((preds == 0) & (labels == 1)).sum())
-        prec   = tp / (tp + fp + 1e-8)
-        rec    = tp / (tp + fn + 1e-8)
+        scores = np.zeros(n, dtype=np.float32)
+        counts = np.zeros(n, dtype=np.float32)
+
+        self.model.eval()
+        for start in range(0, n, half):
+            end    = min(start + W, n)
+            actual = end - start
+            chunk  = np.zeros((W, features.shape[1]), dtype=np.float32)
+            chunk[:actual] = features[start:end]
+            x_t    = torch.from_numpy(chunk[None]).to(self.device)
+            logits = self.model(x_t)[0].cpu().numpy()
+            probs  = 1 / (1 + np.exp(-logits))
+            scores[start:end] += probs[:actual]
+            counts[start:end] += 1.0
         self.model.train()
+
+        probs = scores / np.maximum(counts, 1.0)
+        preds = (probs >= 0.5).astype(int)
+        tp    = int(((preds == 1) & (labels == 1)).sum())
+        fp    = int(((preds == 1) & (labels == 0)).sum())
+        fn    = int(((preds == 0) & (labels == 1)).sum())
+        prec  = tp / (tp + fp + 1e-8)
+        rec   = tp / (tp + fn + 1e-8)
         return 2 * prec * rec / (prec + rec + 1e-8)
 
     # ------------------------------------------------------------------ #

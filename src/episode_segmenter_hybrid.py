@@ -84,8 +84,13 @@ class HybridEpisodeSegmenter(EpisodeSegmenterFast):
 
         Le premier message est toujours frontière (prob=1.0).
         """
-        X     = extract_features(embeddings, artifacts)
-        probs = self.detector.predict_proba(X)           # (n,) float
+        # TCNBoundaryDetector expose predict_proba_sequence (contexte séquentiel).
+        # MLP/BoundaryDetector utilise predict_proba(X) — rétro-compatible.
+        if hasattr(self.detector, 'predict_proba_sequence'):
+            probs = self.detector.predict_proba_sequence(embeddings, artifacts)
+        else:
+            X     = extract_features(embeddings, artifacts)
+            probs = self.detector.predict_proba(X)       # (n,) float
 
         thr   = self.bd_threshold if self.bd_threshold is not None else self.detector.threshold
         mask  = probs >= thr

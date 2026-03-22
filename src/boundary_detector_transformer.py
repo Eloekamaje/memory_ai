@@ -9,12 +9,15 @@ Avantage clé vs TCN :
     de topic), le contexte global est critique — le TCN est structurellement
     limité ici.
 
-Architecture v2 (features discursives) :
-    Projection  : 771 → d_model (128)
-    Features    : mE5 (768) + gap_log (1) + msg_length_log (1) + is_media (1)
+Architecture v3 (projections séparées) :
+    emb_proj    : Linear(768 → d_model=128)
+    scalar_proj : Linear(3 → 32) → GELU → Linear(32 → d_model)   ← MLP dédié
+    Fusion      : h = emb_proj(emb) + scalar_proj(scalaires)
     2× TransformerEncoderLayer : 4 heads, FFN 4×d_model, pre-LN, dropout=0.15
     Head        : d_model → 32 → 1 (sigmoid via BCEWithLogits)
-    Total       : ~500K paramètres
+    Total       : ~502K paramètres
+    Avantage    : les 3 scalaires ont leur propre espace de gradient (≠ v2 où ils
+                  représentaient < 0.5% du gradient dans une projection jointe)
 
 Nouvelles features (issues de l'évaluation qualitative par Claude) :
     msg_length_log : log1p(len(content)) / log1p(500)
@@ -116,17 +119,23 @@ class TransformerModel(nn.Module):
     """
     Transformer Encoder sur séquences d'embeddings mE5.
 
-    Input  : (batch, window, 769) — embedding 768d + gap_log 1d
-    Output : (batch, window)      — logit de frontière par position
+    Input  : (batch, window, d_input) — 768 emb + scalaires (gap, longueur, media)
+    Output : (batch, window)          — logit de frontière par position
 
     Design :
+    - Projections séparées : emb_proj(768→d_model) + scalar_proj(d_scalar→d_model)
+      Les 3 features scalaires avaient < 0.5% du gradient dans une projection jointe
+      (768 dims écrasaient le signal). Les projections séparées évitent ce problème.
+    - Fusion additive après projection (pas de concat pour garder d_model constant)
     - pre-LN (norm_first=True) : plus stable que post-LN, lr plus élevé OK
     - FFN 4× d_model            : standard Transformer
     - Pas de positional encoding explicite : le gap temporel le remplace
     """
 
+    _D_EMB = 768   # dimensions réservées aux embeddings mE5
+
     def __init__(self,
-                 d_input:  int   = INPUT_DIM,   # 769
+                 d_input:  int   = INPUT_DIM_V2,  # 771 par défaut (v2)
                  d_model:  int   = 128,
                  n_heads:  int   = 4,
                  n_layers: int   = 2,
@@ -135,8 +144,18 @@ class TransformerModel(nn.Module):
 
         assert d_model % n_heads == 0, f"d_model={d_model} doit être divisible par n_heads={n_heads}"
 
-        # Projection embeddings + gap → d_model
-        self.proj = nn.Linear(d_input, d_model)
+        self.d_emb    = self._D_EMB
+        self.d_scalar = d_input - self._D_EMB   # 1 (v1) ou 3 (v2)
+
+        # Projection embeddings mE5 → d_model
+        self.emb_proj = nn.Linear(self.d_emb, d_model)
+
+        # Projection scalaires → d_model (MLP pour amplifier le signal faible)
+        self.scalar_proj = nn.Sequential(
+            nn.Linear(self.d_scalar, 32),
+            nn.GELU(),
+            nn.Linear(32, d_model),
+        )
 
         # Transformer Encoder (pre-LN pour stabilité)
         encoder_layer = nn.TransformerEncoderLayer(
@@ -165,13 +184,14 @@ class TransformerModel(nn.Module):
                 x:            torch.Tensor,
                 padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        x            : (B, L, d_input)
-        padding_mask : (B, L) bool — True = position paddée, à ignorer
+        x            : (B, L, d_input)  — embeddings + features scalaires
+        padding_mask : (B, L) bool      — True = position paddée, à ignorer
         Returns      : (B, L) logits
         """
-        h = self.proj(x)                                           # (B, L, d_model)
-        h = self.transformer(h, src_key_padding_mask=padding_mask) # (B, L, d_model)
-        return self.head(h).squeeze(-1)                            # (B, L)
+        h = (self.emb_proj(x[:, :, :self.d_emb])          # (B, L, d_model)
+             + self.scalar_proj(x[:, :, self.d_emb:]))     # (B, L, d_model)
+        h = self.transformer(h, src_key_padding_mask=padding_mask)
+        return self.head(h).squeeze(-1)                    # (B, L)
 
 
 # ================================================================== #
@@ -211,7 +231,7 @@ class TransformerBoundaryDetector:
         self.n_layers    = n_layers
         self.dropout     = dropout
 
-        # v2 : INPUT_DIM_V2=771 (+ msg_length_log + is_media)
+        # v3 : projections séparées — INPUT_DIM_V2=771 (emb 768 + 3 scalaires)
         self.model = TransformerModel(
             d_input  = INPUT_DIM_V2,
             d_model  = d_model,

@@ -163,6 +163,42 @@ class MemoryIndex:
 
         return result
 
+    def add_episode(self, ep: "Episode") -> None:
+        """
+        Ajoute un épisode à l'index sans rebuild complet.
+
+        - Index entités : O(k) mise à jour immédiate.
+        - Index sémantique ANN : rebuild léger (sklearn brute-force, ms pour <5K eps).
+          Pour >5K épisodes, migrer vers FAISS IVF-PQ (H5.a).
+
+        Parameters
+        ----------
+        ep : Episode à ajouter (doit avoir un centroïde non-None pour l'ANN)
+        """
+        # --- Index entités (immédiat) ---
+        for ent in ep.entity_weights:
+            key = ent.lower().strip()
+            self._ent.setdefault(key, set()).add(ep.id)
+
+        if ep.id in self._ep_id_set or ep.centroid is None:
+            return  # déjà indexé ou pas de centroïde → pas d'ANN update
+
+        # --- Index sémantique ANN (rebuild) ---
+        self._ep_ids.append(ep.id)
+        self._ep_id_set.add(ep.id)
+
+        if hasattr(self, "_centroids") and self._centroids is not None:
+            new_centroid = ep.centroid.reshape(1, -1).astype(np.float32)
+            mat = np.vstack([self._centroids, new_centroid])
+        else:
+            mat = ep.centroid.reshape(1, -1).astype(np.float32)
+
+        k = min(self.n_neighbors, len(self._ep_ids))
+        self._nn = NearestNeighbors(n_neighbors=k, metric="cosine", algorithm="brute")
+        self._nn.fit(mat)
+        self._centroids = mat
+        self._built = True
+
     def entity_episodes(self, entity_name: str) -> Set[str]:
         """Épisodes contenant une entité donnée (O(1))."""
         return self._ent.get(entity_name.lower().strip(), set())

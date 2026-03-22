@@ -337,16 +337,22 @@ def build_pipeline(
     log(f"\n  Pipeline terminé en {elapsed:.1f}s")
 
     return {
-        "episodes":   episodes,
-        "artifacts":  artifacts,
-        "embeddings": embeddings,
-        "summaries":  summary_map,
-        "engine":     engine,
-        "agent":      agent,
-        "graph":      graph,
-        "index":      index,
-        "store":      store,
-        "de_report":  de_report,   # None si run_decision_engine=False
+        "episodes":      episodes,
+        "artifacts":     artifacts,
+        "embeddings":    embeddings,
+        "summaries":     summary_map,
+        "engine":        engine,
+        "agent":         agent,
+        "graph":         graph,
+        "index":         index,
+        "store":         store,
+        "de_report":     de_report,
+        # composants internes exposés pour ingest()
+        "segmenter":     segmenter,
+        "summarizer":    summarizer,
+        "extractor":     extractor,
+        "resolver":      resolver,
+        "canonical_map": canonical_map,
     }
 
 
@@ -417,13 +423,152 @@ def load_pipeline(
     log(f"  Chargé en {time.time() - t0:.1f}s")
 
     return {
-        "episodes": episodes,
+        "episodes":  episodes,
         "artifacts": artifacts,
         "embeddings": embeddings,
         "summaries": summary_map,
-        "engine": engine,
-        "agent": agent,
-        "graph": graph,
-        "index": index,
-        "store": store,
+        "engine":    engine,
+        "agent":     agent,
+        "graph":     graph,
+        "index":     index,
+        "store":     store,
     }
+
+
+# ================================================================== #
+# ingest() — pipeline incrémental                                     #
+# ================================================================== #
+
+def ingest(
+    artifact: Artifact,
+    state:    Dict,
+    *,
+    attach_threshold: float = 0.30,
+    now:              Optional[datetime] = None,
+    verbose:          bool = False,
+) -> Dict:
+    """
+    Ingère un seul artefact dans le pipeline existant — sans rebuild complet.
+
+    Étapes :
+        1. Embed le nouvel artefact
+        2. Extrait ses entités (si extractor disponible dans state)
+        3. Attache à l'épisode le plus proche ou crée un nouvel épisode
+        4. Met à jour MemoryGraph et MemoryIndex en place
+        5. Lance le Decision Engine (SURFACE proactif sur l'artefact entrant)
+
+    Limitations v0 :
+        - Pas de boundary detector (TCN/Transformer) — attach cosine direct
+        - MemoryStore non mis à jour automatiquement (appeler state['store'].save())
+        - Embeddings matrix non étendue (RecallEngine sur anciens seuls)
+
+    Retourne
+    --------
+    Dict avec clés : episode, is_new, sim, de_report
+    """
+    def log(msg):
+        if verbose:
+            print(f"  [ingest] {msg}", flush=True)
+
+    episodes = state["episodes"]
+
+    # ── 1. Embedding ─────────────────────────────────────────────────
+    emb = embed_texts([artifact.content])[0].astype(np.float32)
+    log(f"embed OK")
+
+    # ── 2. Entités ───────────────────────────────────────────────────
+    _ingest_entities(artifact, state.get("extractor"))
+    log(f"entités : {artifact.entities[:5]}")
+
+    # ── 3. Attach ou créer épisode ───────────────────────────────────
+    target_ep, is_new, sim = _attach_or_create(
+        artifact, emb, episodes, attach_threshold)
+    log(f"{'Nouvel épisode' if is_new else f'Attaché (sim={sim:.3f})'} → {target_ep.id}")
+
+    # ── 4. Mise à jour Graph + Index ─────────────────────────────────
+    state["graph"].add_episode(target_ep)
+    state["index"].add_episode(target_ep)
+    log("graph + index mis à jour")
+
+    # ── 5. Decision Engine ───────────────────────────────────────────
+    artifact.goal_vector = emb
+    de        = DecisionEngine()
+    de_actions = de.evaluate(episodes, new_artifact=artifact, now=now)
+    executor  = ActionExecutor(summarizer=state.get("summarizer"))
+    de_report = executor.apply(de_actions, state["artifacts"], state["embeddings"])
+    log(f"Decision Engine : {len(de_actions)} actions")
+
+    return {"episode": target_ep, "is_new": is_new, "sim": sim, "de_report": de_report}
+
+
+# ── helpers ingest ──────────────────────────────────────────────────
+
+def _ingest_entities(artifact: Artifact, extractor) -> None:
+    """Extrait et injecte les entités dans l'artefact (best-effort)."""
+    if extractor is None:
+        return
+    try:
+        for m in extractor.extract(artifact):
+            if m.canonical_name not in artifact.entities:
+                artifact.entities.append(m.canonical_name)
+    except Exception:
+        pass
+
+
+def _attach_or_create(
+    artifact:         Artifact,
+    emb:              np.ndarray,
+    episodes:         list,
+    attach_threshold: float,
+):
+    """
+    Retourne (episode, is_new, best_sim).
+    Si best_sim < attach_threshold → crée un nouvel épisode.
+    Sinon → met à jour l'épisode existant le plus proche (EMA centroïde).
+    """
+    best_ep, best_sim = _best_active_episode(emb, episodes)
+
+    if best_ep is None or best_sim < attach_threshold:
+        return _create_episode(artifact, emb, episodes), True, best_sim or 0.0
+
+    _update_episode_ema(best_ep, artifact, emb)
+    return best_ep, False, best_sim
+
+
+def _best_active_episode(emb: np.ndarray, episodes: list):
+    """Retourne (episode, sim) de l'épisode actif/dormant le plus proche."""
+    best_ep, best_sim = None, 0.0
+    norm_emb = np.linalg.norm(emb) + 1e-9
+    for ep in episodes:
+        if ep.state.value not in ("ACTIVE", "DORMANT") or ep.centroid is None:
+            continue
+        sim = float(np.dot(emb, ep.centroid) / (norm_emb * np.linalg.norm(ep.centroid) + 1e-9))
+        if sim > best_sim:
+            best_sim, best_ep = sim, ep
+    return best_ep, best_sim
+
+
+def _create_episode(artifact: Artifact, emb: np.ndarray, episodes: list):
+    """Crée et enregistre un nouvel épisode à partir d'un artefact."""
+    from models import Episode
+    ep = Episode(
+        id            = f"ep_{len(episodes) + 1:04d}",
+        centroid      = emb.copy(),
+        centroid_init = emb.copy(),
+        time_interval = (artifact.timestamp, artifact.timestamp),
+        memory_score  = 1.0,
+        entity_weights= {ent: 1.0 for ent in artifact.entities},
+    )
+    episodes.append(ep)
+    return ep
+
+
+def _update_episode_ema(ep, artifact: Artifact, emb: np.ndarray,
+                         alpha: float = 0.15) -> None:
+    """Met à jour centroïde (EMA), intervalle temporel et entités."""
+    ep.centroid = (1 - alpha) * ep.centroid + alpha * emb
+    ep.centroid /= np.linalg.norm(ep.centroid) + 1e-9
+    t0 = ep.time_interval[0] if ep.time_interval else artifact.timestamp
+    ep.time_interval = (t0, artifact.timestamp)
+    for ent in artifact.entities:
+        ep.entity_weights[ent] = ep.entity_weights.get(ent, 0.0) + 0.5

@@ -345,6 +345,52 @@ class MemoryGraph:
 
         return self
 
+    def add_episode(self, ep: "Episode") -> None:
+        """
+        Ajoute un épisode au graphe sans rebuild complet.
+
+        Met à jour en O(k) où k = nombre d'entités de l'épisode.
+        Crée les nœuds entité manquants. Met à jour total_weight des existants.
+        """
+        if ep.id in self.episode_nodes:
+            # Mise à jour d'un épisode existant (nouveau artefact rattaché)
+            enode = self.episode_nodes[ep.id]
+            enode.artifact_count = len(ep.artifact_indices)
+            enode.time_interval  = ep.time_interval
+            enode.centroid       = ep.centroid
+            enode.state          = ep.state
+        else:
+            enode = EpisodeNode(
+                episode_id     = ep.id,
+                artifact_count = len(ep.artifact_indices),
+                time_interval  = ep.time_interval,
+                centroid       = ep.centroid,
+                state          = ep.state,
+            )
+            self.episode_nodes[ep.id] = enode
+            if not hasattr(self, "_episode_artifact_indices"):
+                self._episode_artifact_indices = {}
+            self._episode_artifact_indices[ep.id] = list(ep.artifact_indices)
+
+        # Arêtes biparti + index inversés
+        for ent_name, weight in ep.entity_weights.items():
+            enode.entity_names.add(ent_name)
+            self._edges[(ep.id, ent_name)]  = weight
+            self._ep_to_ents[ep.id].add(ent_name)
+            self._ent_to_eps[ent_name].add(ep.id)
+
+            # Nœud entité — créer ou mettre à jour total_weight
+            if ent_name not in self.entity_nodes:
+                self.entity_nodes[ent_name] = EntityNode(
+                    canonical_name = ent_name,
+                    episode_ids    = {ep.id},
+                    total_weight   = weight,
+                )
+            else:
+                en = self.entity_nodes[ent_name]
+                en.episode_ids.add(ep.id)
+                en.total_weight += weight
+
     def _semantic_cohesion(
         self,
         artifact_indices: List[int],

@@ -36,6 +36,7 @@ from typing import Callable, Dict, List, Optional
 import numpy as np
 
 # ── modules du projet ──────────────────────────────────────────────
+from decision_engine import ActionExecutor, DecisionEngine
 from embedding_engine import embed_texts
 from entity_extractor import EntityExtractor
 from entity_resolver import EntityResolver
@@ -180,6 +181,8 @@ def build_pipeline(
     split_config: Optional[SplitConfig] = None,
     # Aging
     archive_after_days: int = 0,       # 0 = désactivé
+    # Decision Engine (post-build)
+    run_decision_engine: bool = True,
     # LLM (optionnel pour le MemoryAgent)
     llm_fn: Optional[Callable] = None,
     top_k_recall: int = 7,
@@ -302,6 +305,16 @@ def build_pipeline(
     index.save(os.path.join(store_dir, "memory_index"))
     log(f"      Sauvegardé dans {store_dir}/")
 
+    # ── Decision Engine (post-build) ───────────────────────────────
+    de_report = None
+    if run_decision_engine:
+        log("[DE] Decision Engine …")
+        de = DecisionEngine()
+        actions = de.evaluate(episodes)
+        executor = ActionExecutor(summarizer=summarizer)
+        de_report = executor.apply(actions, artifacts, embeddings)
+        log(f"      {de_report.summary().splitlines()[0]}")
+
     # ── RecallEngine ───────────────────────────────────────────────
     engine = RecallEngine(
         episodes=episodes,
@@ -324,15 +337,16 @@ def build_pipeline(
     log(f"\n  Pipeline terminé en {elapsed:.1f}s")
 
     return {
-        "episodes": episodes,
-        "artifacts": artifacts,
+        "episodes":   episodes,
+        "artifacts":  artifacts,
         "embeddings": embeddings,
-        "summaries": summary_map,
-        "engine": engine,
-        "agent": agent,
-        "graph": graph,
-        "index": index,
-        "store": store,
+        "summaries":  summary_map,
+        "engine":     engine,
+        "agent":      agent,
+        "graph":      graph,
+        "index":      index,
+        "store":      store,
+        "de_report":  de_report,   # None si run_decision_engine=False
     }
 
 

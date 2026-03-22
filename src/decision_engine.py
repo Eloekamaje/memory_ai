@@ -39,9 +39,12 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from episode_summarizer import EpisodeSummarizer
 
 from models import Artifact, Episode, EpisodeState
 
@@ -392,3 +395,144 @@ def _urgency(age_days: Optional[float], threshold: float, importance: float) -> 
     ratio     = age_days / max(threshold, 1.0)
     dampening = 1.0 - 0.4 * importance   # importance élevée → score réduit de 40%
     return round(min(1.0, ratio * dampening), 4)
+
+
+# ================================================================== #
+# ExecutionReport                                                      #
+# ================================================================== #
+
+@dataclass
+class ExecutionReport:
+    """Résultat de l'exécution des actions par ActionExecutor."""
+
+    compressed: List[str] = field(default_factory=list)   # episode ids
+    archived:   List[str] = field(default_factory=list)
+    flagged:    List[str] = field(default_factory=list)
+    links:      List[Tuple[str, str, List[str]]] = field(default_factory=list)
+    surfaces:   List[Action]                     = field(default_factory=list)
+
+    def summary(self) -> str:
+        lines = ["ActionExecutor — rapport d'exécution"]
+        if self.compressed:
+            lines.append(f"  COMPRESS  : {len(self.compressed)} épisodes → CONSOLIDATED")
+        if self.archived:
+            lines.append(f"  ARCHIVE   : {len(self.archived)} épisodes → ARCHIVED")
+        if self.flagged:
+            lines.append(f"  FLAG      : {len(self.flagged)} épisodes ouverts")
+        if self.links:
+            lines.append(f"  LINK      : {len(self.links)} connexions détectées")
+        if self.surfaces:
+            lines.append(f"  SURFACE   : {len(self.surfaces)} suggestions proactives")
+            for s in self.surfaces[:3]:
+                lines.append(f"    → {s.summary()}")
+        if not any([self.compressed, self.archived, self.flagged,
+                    self.links, self.surfaces]):
+            lines.append("  Aucune action appliquée.")
+        return "\n".join(lines)
+
+
+# ================================================================== #
+# ActionExecutor                                                       #
+# ================================================================== #
+
+class ActionExecutor:
+    """
+    Applique les actions produites par DecisionEngine.
+
+    Usage
+    -----
+    executor = ActionExecutor(summarizer=summarizer)
+    report   = executor.apply(actions, episodes, artifacts, embeddings)
+    print(report.summary())
+
+    Paramètres
+    ----------
+    summarizer : EpisodeSummarizer — pour générer les résumés (COMPRESS)
+                 Si None, la compression change l'état mais ne génère pas de résumé.
+    decay_on_compress : float
+        Facteur appliqué à memory_score lors d'une compression (défaut 0.85).
+    """
+
+    def __init__(
+        self,
+        summarizer:        Optional["EpisodeSummarizer"] = None,
+        decay_on_compress: float = 0.85,
+    ):
+        self.summarizer        = summarizer
+        self.decay_on_compress = decay_on_compress
+
+    def apply(
+        self,
+        actions:    List[Action],
+        artifacts:  List[Artifact],
+        embeddings: np.ndarray,
+    ) -> ExecutionReport:
+        """
+        Applique toutes les actions sur les épisodes en place (mutation).
+
+        Seuls COMPRESS et ARCHIVE modifient l'état des épisodes.
+        SURFACE et LINK sont enregistrés dans le rapport sans mutation.
+        FLAG marque l'épisode via son context (non-mutatif sur Episode).
+        """
+        report = ExecutionReport()
+
+        for action in actions:
+            if action.type == ActionType.COMPRESS:
+                self._compress(action.episode, artifacts, embeddings)
+                report.compressed.append(action.episode.id)
+
+            elif action.type == ActionType.ARCHIVE:
+                self._archive(action.episode)
+                report.archived.append(action.episode.id)
+
+            elif action.type == ActionType.FLAG:
+                report.flagged.append(action.episode.id)
+
+            elif action.type == ActionType.LINK:
+                ep_a = action.episode
+                ep_b = action.episode_b
+                shared = action.context.get("shared_entities", [])
+                report.links.append((ep_a.id, ep_b.id, shared))
+
+            elif action.type == ActionType.SURFACE:
+                report.surfaces.append(action)
+
+        return report
+
+    # ------------------------------------------------------------------ #
+    # Implémentation des actions                                           #
+    # ------------------------------------------------------------------ #
+
+    def _compress(
+        self,
+        ep:         Episode,
+        artifacts:  List[Artifact],
+        embeddings: np.ndarray,
+    ) -> None:
+        """
+        COMPRESS : DORMANT → CONSOLIDATED.
+        Génère un résumé si un summarizer est disponible.
+        Libère le centroïde EMA (garde centroid_init pour l'identité).
+        """
+        ep.state = EpisodeState.CONSOLIDATED
+        ep.memory_score = round(ep.memory_score * self.decay_on_compress, 4)
+
+        if self.summarizer is not None and ep.artifact_indices:
+            try:
+                self.summarizer.summarize_one(ep, artifacts, embeddings)
+            except Exception:
+                pass  # résumé non bloquant
+
+        # Libère le centroïde EMA — garde centroid_init pour les recalls futurs
+        ep.centroid = ep.centroid_init
+
+    def _archive(self, ep: Episode) -> None:
+        """
+        ARCHIVE : CONSOLIDATED → ARCHIVED.
+        Libère tous les vecteurs — seuls label + entités + time_interval restent.
+        """
+        ep.state        = EpisodeState.ARCHIVED
+        ep.centroid     = None
+        ep.centroid_init = None
+        ep.goal_centroid = None
+        ep.memory_score  = round(ep.memory_score * 0.5, 4)

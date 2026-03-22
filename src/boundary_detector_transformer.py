@@ -9,12 +9,18 @@ Avantage clé vs TCN :
     de topic), le contexte global est critique — le TCN est structurellement
     limité ici.
 
-Architecture :
-    Projection  : 769 → d_model (128)
-    Temporal    : log1p(gap_min) → d_model, sommé à la projection
+Architecture v2 (features discursives) :
+    Projection  : 771 → d_model (128)
+    Features    : mE5 (768) + gap_log (1) + msg_length_log (1) + is_media (1)
     2× TransformerEncoderLayer : 4 heads, FFN 4×d_model, pre-LN, dropout=0.15
     Head        : d_model → 32 → 1 (sigmoid via BCEWithLogits)
     Total       : ~500K paramètres
+
+Nouvelles features (issues de l'évaluation qualitative par Claude) :
+    msg_length_log : log1p(len(content)) / log1p(500)
+        → capte la verbosité : débat=long, partage médias=court
+    is_media : 1 si URL détectée ou message < 15 chars
+        → cible les faux positifs dans les phases de partage de liens
 
 Interface identique à TCNBoundaryDetector :
     - fit_sequence(embeddings, artifacts, y_true, ...)
@@ -31,6 +37,7 @@ Références :
 
 from __future__ import annotations
 
+import re
 import numpy as np
 import torch
 import torch.nn as nn
@@ -44,9 +51,61 @@ from boundary_detector_tcn import (
     FocalLoss,
     make_windows,
     extract_boundary_labels,
-    _sequence_features,
     INPUT_DIM,          # 769 = 768 emb + 1 gap_log
 )
+
+# ================================================================== #
+# Features discursives (v2)                                           #
+# ================================================================== #
+
+INPUT_DIM_V2 = 771   # 768 emb + gap_log + msg_length_log + is_media
+
+_URL_RE = re.compile(r'https?://|www\.|bit\.ly|youtu\.be|fb\.com|tinyurl', re.IGNORECASE)
+
+
+def _sequence_features_v2(embeddings: np.ndarray,
+                           artifacts:  List[Artifact]) -> np.ndarray:
+    """
+    Features étendues pour le Transformer (771d).
+
+    Features par message t :
+        emb_t          (768,) : embedding mE5
+        gap_log        (  1,) : log1p(gap_min) / log1p(1440) — rupture temporelle
+        msg_length_log (  1,) : log1p(len(content)) / log1p(500) — verbosité
+        is_media       (  1,) : 1 si URL ou message < 15 chars — partage passif
+
+    Motivation (évaluation qualitative Claude, 22/03/2026) :
+        FP systématiques dans les phases de partage de médias :
+            → msg_length_log ≈ 0, is_media = 1
+        FN systématiques aux ruptures de registre (passif → actif) :
+            → msg_length_log augmente brusquement après la frontière
+    """
+    n, d = embeddings.shape
+    X = np.zeros((n, INPUT_DIM_V2), dtype=np.float32)
+    X[:, :d] = embeddings.astype(np.float32)
+
+    for i in range(n):
+        content = artifacts[i].content or ''
+
+        # gap_log
+        if i == 0:
+            X[i, d] = 1.0
+        else:
+            t1 = artifacts[i - 1].timestamp
+            t2 = artifacts[i].timestamp
+            if t1 is not None and t2 is not None:
+                gap_min = abs((t2 - t1).total_seconds() / 60.0)
+                X[i, d] = float(np.log1p(gap_min) / np.log1p(1440.0))
+
+        # msg_length_log : verbosité normalisée (log car distribution très skewed)
+        X[i, d + 1] = float(np.log1p(len(content)) / np.log1p(500.0))
+
+        # is_media : lien URL ou message très court
+        is_url   = bool(_URL_RE.search(content))
+        is_short = len(content.strip()) < 15
+        X[i, d + 2] = 1.0 if (is_url or is_short) else 0.0
+
+    return X
 
 
 # ================================================================== #
@@ -152,8 +211,9 @@ class TransformerBoundaryDetector:
         self.n_layers    = n_layers
         self.dropout     = dropout
 
+        # v2 : INPUT_DIM_V2=771 (+ msg_length_log + is_media)
         self.model = TransformerModel(
-            d_input  = INPUT_DIM,
+            d_input  = INPUT_DIM_V2,
             d_model  = d_model,
             n_heads  = n_heads,
             n_layers = n_layers,
@@ -185,7 +245,7 @@ class TransformerBoundaryDetector:
         Warmup : 5% des steps pour stabiliser l'attention.
         """
         n        = len(embeddings)
-        features = _sequence_features(embeddings, artifacts, use_cos_sim=False)
+        features = _sequence_features_v2(embeddings, artifacts)
         labels   = extract_boundary_labels(y_true, n)
 
         n_pos       = max(int(labels.sum()), 1)
@@ -286,7 +346,7 @@ class TransformerBoundaryDetector:
         if n == 0:
             return np.array([], dtype=np.float32)
 
-        features = _sequence_features(embeddings, artifacts, use_cos_sim=False)
+        features = _sequence_features_v2(embeddings, artifacts)
         W        = self.window_size
         half     = W // 2
 
@@ -408,7 +468,7 @@ class TransformerBoundaryDetector:
             'state_dict': self.model.state_dict(),
             'threshold':  self.threshold,
             'model_cfg': {
-                'd_input':     INPUT_DIM,
+                'd_input':     INPUT_DIM_V2,
                 'd_model':     self.d_model,
                 'n_heads':     self.n_heads,
                 'n_layers':    self.n_layers,

@@ -618,8 +618,11 @@ class EntityExtractor:
             self._backend = GLiNERBackend(**backend_kwargs)
         elif backend == "spacy":
             self._backend = SpacyBackend(batch_size=batch_size)
+        elif backend == "llm":
+            from llm_ner import create_llm_ner
+            self._backend = create_llm_ner(**backend_kwargs)
         else:
-            raise ValueError(f"Backend inconnu : {backend!r}. Choix : 'gliner', 'spacy'")
+            raise ValueError(f"Backend inconnu : {backend!r}. Choix : 'gliner', 'spacy', 'llm'")
 
         self._backend_name = self._backend.name
 

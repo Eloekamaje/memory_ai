@@ -41,6 +41,7 @@ from embedding_engine import embed_texts
 from entity_extractor import EntityExtractor
 from entity_resolver import EntityResolver
 from episode_algorithm import EpisodeSegmenter
+from episode_segmenter_hybrid import HybridEpisodeSegmenter
 from episode_splitter import EpisodeSplitter, SplitConfig
 from episode_summarizer import EpisodeSummarizer, attach_summaries
 from goal_heuristics import compute_goal_vectors
@@ -53,11 +54,45 @@ from recall_engine import RecallEngine
 
 
 # ================================================================== #
+# Configuration                                                       #
+# ================================================================== #
+
+from dataclasses import dataclass, field as _field
+
+
+@dataclass
+class SegmentConfig:
+    """
+    Paramètres de segmentation épisodique pour build_pipeline().
+
+    Segmentation greedy (Stage 2 AttachScore) :
+      time_threshold_minutes  : gap temporel au-delà duquel un épisode est candidat à la clôture
+      attach_threshold        : seuil minimum de AttachScore pour rattacher un message
+      dormancy_minutes        : délai sans activité avant de passer ACTIVE → DORMANT
+      hard_break_minutes      : gap absolu forçant un nouvel épisode (ignore AttachScore)
+      consolidate             : fusionner les épisodes unitaires adjacents
+
+    Stage 1 (Transformer boundary detector — optionnel) :
+      boundary_detector_path  : chemin vers un fichier .pt entraîné.
+                                Si None ou introuvable → AttachScore pur (Stage 2 seulement).
+      boundary_k              : facteur de calibration probabiliste [0, 1].
+                                0 = seuil fixe, 0.3 = défaut recommandé.
+    """
+    time_threshold_minutes: float = 120.0
+    attach_threshold: float = 0.30
+    dormancy_minutes: float = 1440.0
+    hard_break_minutes: float = 720.0
+    consolidate: bool = True
+    boundary_detector_path: Optional[str] = None
+    boundary_k: float = 0.3
+
+
+# ================================================================== #
 # Helpers parsers                                                     #
 # ================================================================== #
 
-def _parse(data_path: str) -> List[Artifact]:
-    """Détecte le format et parse en List[Artifact]."""
+def _parse_one(data_path: str) -> List[Artifact]:
+    """Parse un seul fichier selon son extension."""
     path = Path(data_path)
     ext = path.suffix.lower()
 
@@ -70,6 +105,122 @@ def _parse(data_path: str) -> List[Artifact]:
         return parse_experiment_csv(str(path))
 
     raise ValueError(f"Format non supporté : {ext!r}. Utilise .txt (WhatsApp) ou .csv.")
+
+
+def _parse(data_paths) -> List[Artifact]:
+    """
+    Parse un ou plusieurs fichiers, merge et trie par timestamp.
+
+    Accepte :
+      - str              : un seul fichier (comportement original)
+      - List[str]        : plusieurs fichiers multi-sources
+
+    Les artefacts sont triés chronologiquement après merge.
+    Le champ artifact.source est conservé pour distinguer les canaux.
+    """
+    if isinstance(data_paths, str):
+        return _parse_one(data_paths)
+
+    all_artifacts: List[Artifact] = []
+    for path in data_paths:
+        all_artifacts.extend(_parse_one(path))
+
+    # Tri chronologique global — clé pour que le Transformer et gap_log aient du sens
+    all_artifacts.sort(key=lambda a: a.timestamp)
+    return all_artifacts
+
+
+# ================================================================== #
+# Cache (embeddings + mentions GLiNER)                               #
+# ================================================================== #
+
+import gc
+import hashlib
+import json
+
+
+def _file_hash(path: str) -> str:
+    """SHA-256 des 4 premiers Mo d'un fichier."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        h.update(f.read(4 * 1024 * 1024))
+    return h.hexdigest()[:16]
+
+
+def _files_hash(paths: List[str]) -> str:
+    """Hash combiné de plusieurs fichiers — change si l'un d'eux change."""
+    h = hashlib.sha256()
+    for path in sorted(paths):          # sorted → ordre stable indépendant de l'appel
+        h.update(path.encode())
+        with open(path, "rb") as f:
+            h.update(f.read(4 * 1024 * 1024))
+    return h.hexdigest()[:16]
+
+
+def _cache_dir(store_dir: str) -> Path:
+    p = Path(store_dir) / "cache"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+# ── Arrays numpy (embeddings, goal_vectors) ────────────────────────
+
+def _load_cached(store_dir: str, file_hash: str, name: str, log):
+    cp = _cache_dir(store_dir) / f"{name}_{file_hash}.npy"
+    if cp.exists():
+        arr = np.load(str(cp))
+        log(f"      ↩ {name} chargé depuis cache ({cp.name})")
+        return arr
+    return None
+
+
+def _save_cache(store_dir: str, file_hash: str, name: str, arr: np.ndarray) -> None:
+    cp = _cache_dir(store_dir) / f"{name}_{file_hash}.npy"
+    np.save(str(cp), arr)
+
+
+# ── Mentions GLiNER (JSON) ──────────────────────────────────────────
+
+def _mentions_cache_path(store_dir: str, file_hash: str) -> Path:
+    return _cache_dir(store_dir) / f"mentions_{file_hash}.json"
+
+
+def _load_mentions_cache(store_dir: str, file_hash: str, log):
+    """Recharge les mentions depuis le cache JSON. Retourne None si absent."""
+    from entity_extractor import EntityType, Mention
+    cp = _mentions_cache_path(store_dir, file_hash)
+    if not cp.exists():
+        return None
+    with open(cp, encoding="utf-8") as f:
+        raw = json.load(f)
+    mentions = [
+        Mention(
+            surface_form=m["surface_form"],
+            entity_type=EntityType[m["entity_type"]],
+            source_artifact_id=m["source_artifact_id"],
+            confidence=m["confidence"],
+            extraction_method=m["extraction_method"],
+        )
+        for m in raw
+    ]
+    log(f"      ↩ mentions chargées depuis cache ({cp.name}, {len(mentions)} entrées)")
+    return mentions
+
+
+def _save_mentions_cache(store_dir: str, file_hash: str, mentions) -> None:
+    cp = _mentions_cache_path(store_dir, file_hash)
+    raw = [
+        {
+            "surface_form": m.surface_form,
+            "entity_type": m.entity_type.name,
+            "source_artifact_id": m.source_artifact_id,
+            "confidence": m.confidence,
+            "extraction_method": m.extraction_method,
+        }
+        for m in mentions
+    ]
+    with open(cp, "w", encoding="utf-8") as f:
+        json.dump(raw, f, ensure_ascii=False)
 
 
 # ================================================================== #
@@ -89,15 +240,38 @@ def _inject_entities(artifacts, canonical_map, art_id_to_idx, n_artifacts):
     """
     count = 0
     for ce in canonical_map.values():
-        freq = len(ce.artifact_ids) / n_artifacts if n_artifacts else 1.0
-        if freq > 0.30 or ce.canonical_name.lower().startswith("http"):
+        n_occ = len(ce.artifact_ids)
+        freq = n_occ / n_artifacts if n_artifacts else 1.0
+        name = ce.canonical_name.strip()
+        if not _entity_is_useful(ce.entity_type, name, freq, n_occ):
             continue
         for art_id in ce.artifact_ids:
             idx = art_id_to_idx.get(str(art_id))
-            if idx is not None and ce.canonical_name not in artifacts[idx].entities:
-                artifacts[idx].entities.append(ce.canonical_name)
+            if idx is not None and name not in artifacts[idx].entities:
+                artifacts[idx].entities.append(name)
                 count += 1
     return count
+
+
+def _entity_is_useful(entity_type, name: str, freq: float, count: int = 1) -> bool:
+    """Filtre de qualité pour les entités canoniques injectées dans les artefacts."""
+    from entity_extractor import EntityType
+    _KEEP_TYPES = {
+        EntityType.PERSON, EntityType.ORG, EntityType.PLACE,
+        EntityType.PROJECT, EntityType.PRODUCT, EntityType.EVENT,
+        EntityType.DATE_EVENT, EntityType.DOCUMENT,
+    }
+    if freq > 0.30:                         # trop fréquent = non discriminant
+        return False
+    if entity_type not in _KEEP_TYPES:      # URL / HANDLE / UNKNOWN / CONCEPT
+        return False
+    if len(name) < 3:                       # trop court
+        return False
+    if len(name.split()) > 3:              # expression > 3 mots = bruit GLiNER
+        return False
+    if count < 2:                           # singleton = bruit probable
+        return False
+    return True
 
 
 def _entity_weights(n_injected: int):
@@ -147,6 +321,45 @@ def _run_aging(store, episodes, archive_after_days: int, log) -> None:
         log(f"      {n_archived} épisodes archivés")
 
 
+def _build_segmenter(
+    seg: "SegmentConfig",
+    alpha: float,
+    beta: float,
+    embeddings: "np.ndarray",
+    log,
+):
+    """
+    Instancie le segmenteur selon seg.boundary_detector_path.
+
+    - Si un .pt valide est fourni → HybridEpisodeSegmenter (Stage 1 + 2 + 3)
+    - Sinon                       → EpisodeSegmenter (Stage 2 + 3, AttachScore pur)
+    """
+    common = {
+        "time_threshold_minutes": seg.time_threshold_minutes,
+        "attach_threshold": seg.attach_threshold,
+        "dormancy_minutes": seg.dormancy_minutes,
+        "hard_break_minutes": seg.hard_break_minutes,
+        "alpha": alpha,
+        "beta": beta,
+    }
+
+    bd_path = seg.boundary_detector_path
+    if bd_path and Path(bd_path).exists():
+        from boundary_detector_transformer import TransformerBoundaryDetector
+        emb_dim = embeddings.shape[1]
+        detector = TransformerBoundaryDetector(d_input=emb_dim + 1).load(bd_path)
+        log(f"      Stage 1 Transformer chargé ({bd_path}) — d_input={emb_dim + 1}")
+        return HybridEpisodeSegmenter(
+            detector=detector,
+            boundary_k=seg.boundary_k,
+            **common,
+        )
+
+    if bd_path:
+        log(f"      ⚠ boundary_detector_path={bd_path!r} introuvable → AttachScore pur")
+    return EpisodeSegmenter(**common)
+
+
 class _CanonicalLookup:
     """
     Adaptateur pour MemoryGraph.build() qui attend resolver.lookup(surface_form).
@@ -168,25 +381,18 @@ class _CanonicalLookup:
 # ================================================================== #
 
 def build_pipeline(
-    data_path: str,
+    data_path,                          # str OU List[str]
     store_dir: str = "memory",
     *,
-    # Segmentation
-    time_threshold_minutes: float = 120,
-    attach_threshold: float = 0.30,
-    dormancy_minutes: float = 1440,
-    hard_break_minutes: float = 720,   # V3 : sessions de 12h par défaut
-    consolidate: bool = True,
-    # Splitting post-segmentation (None = config par défaut)
+    segment_config: Optional[SegmentConfig] = None,
     split_config: Optional[SplitConfig] = None,
-    # Aging
-    archive_after_days: int = 0,       # 0 = désactivé
-    # Decision Engine (post-build)
+    archive_after_days: int = 0,
     run_decision_engine: bool = True,
-    # LLM (optionnel pour le MemoryAgent)
     llm_fn: Optional[Callable] = None,
     top_k_recall: int = 7,
-    # Verbosité
+    ner_backend: str = "gliner",
+    summarizer_backend: str = "extractive",
+    gguf_path: Optional[str] = None,
     verbose: bool = True,
 ) -> Dict:
     """
@@ -194,17 +400,30 @@ def build_pipeline(
 
     Parameters
     ----------
-    data_path        : chemin vers le fichier de données (.txt WhatsApp ou .csv)
+    data_path        : str ou List[str] — un ou plusieurs fichiers de données.
+                       Formats supportés : .txt (WhatsApp), .csv.
+                       Si plusieurs fichiers, les artefacts sont mergés et triés par timestamp.
     store_dir        : répertoire de persistance
+    segment_config   : paramètres de segmentation (voir SegmentConfig). None = défauts.
+    split_config     : paramètres de splitting post-segmentation. None = défauts.
     archive_after_days : archiver les épisodes CONSOLIDATED > N jours (0 = off)
+    run_decision_engine : appliquer le Decision Engine après segmentation
     llm_fn           : callable(system, user) -> str pour le MemoryAgent
+    top_k_recall     : nombre max de résultats pour RecallEngine
+    ner_backend      : "gliner" (défaut) | "spacy" | "llm" (Qwen2.5 GGUF)
+    summarizer_backend : "extractive" (défaut) | "llm" (Qwen2.5 GGUF)
+    gguf_path        : chemin GGUF pour les backends LLM (NER + summarizer).
+                       Si None, auto-détection du modèle Qwen2.5.
     verbose          : affiche la progression
 
     Returns
     -------
     Dict avec clés : episodes, artifacts, embeddings, summaries,
-                     engine, agent, graph, index, store
+                     engine, agent, graph, index, store, de_report,
+                     segmenter, summarizer, extractor, resolver, canonical_map
     """
+    seg = segment_config if segment_config is not None else SegmentConfig()
+
     def log(msg):
         if verbose:
             print(f"  {msg}", flush=True)
@@ -212,36 +431,64 @@ def build_pipeline(
     t0 = time.time()
 
     # ── 1. Parse ───────────────────────────────────────────────────
-    log(f"[1/10] Parsing {data_path} …")
+    paths = [data_path] if isinstance(data_path, str) else list(data_path)
+    sources_str = ", ".join(Path(p).name for p in paths)
+    log(f"[1/10] Parsing {sources_str} …")
     artifacts = _parse(data_path)
-    log(f"      {len(artifacts)} artefacts chargés")
+    sources = sorted({a.source for a in artifacts if a.source})
+    log(f"      {len(artifacts)} artefacts chargés ({len(paths)} source(s) : {', '.join(sources) or '—'})")
+
+    # Hash combiné de tous les fichiers sources → invalidation cache si l'un change
+    fhash = _files_hash(paths)
 
     # ── 2. Embeddings ──────────────────────────────────────────────
-    log("[2/10] Embeddings (all-MiniLM-L6-v2) …")
-    texts = [a.content for a in artifacts]
-    embeddings = embed_texts(texts)
-    embeddings = embeddings.astype(np.float32)
+    log("[2/10] Embeddings (multilingual-e5-base 768d) …")
+    embeddings = _load_cached(store_dir, fhash, "embeddings", log)
+    if embeddings is None:
+        texts = [a.content for a in artifacts]
+        embeddings = embed_texts(texts).astype(np.float32)
+        _save_cache(store_dir, fhash, "embeddings", embeddings)
     log(f"      shape={embeddings.shape}")
 
     # ── 3. Goal vectors ────────────────────────────────────────────
     log("[3/10] Goal heuristics …")
-    goal_vectors = compute_goal_vectors(artifacts, embed_fn=embed_texts)
+    goal_vectors = _load_cached(store_dir, fhash, "goal_vectors", log)
+    if goal_vectors is None:
+        goal_vectors = compute_goal_vectors(artifacts, embed_fn=embed_texts)
+        if goal_vectors is not None:
+            _save_cache(store_dir, fhash, "goal_vectors", goal_vectors)
     _attach_goal_vectors(artifacts, goal_vectors)
 
     # ── 4. Entity extraction ───────────────────────────────────────
-    log("[4/10] Entity extraction …")
-    extractor = EntityExtractor()
-    mentions = extractor.extract_batch(artifacts)
+    # Backend sélectionnable : "gliner" (défaut, lourd), "spacy", ou "llm" (Qwen2.5 GGUF).
+    # GLiNER (multi-v2.1) pour le batch → qualité maximale, résultat mis en cache.
+    # Le backend "llm" unifie batch ET query → plus de mismatch NER.
+    _ner_label = {"gliner": "GLiNER multi-v2.1", "spacy": "spaCy", "llm": "Qwen2.5 GGUF"}
+    log(f"[4/10] Entity extraction ({_ner_label.get(ner_backend, ner_backend)}) …")
+    mentions = _load_mentions_cache(store_dir, fhash, log)
+    if mentions is None:
+        _ner_kwargs = {"model_path": gguf_path, "verbose": verbose} if ner_backend == "llm" and gguf_path else {}
+        _extractor_batch = EntityExtractor(backend=ner_backend, **_ner_kwargs)
+        mentions = _extractor_batch.extract_batch(artifacts)
+        _save_mentions_cache(store_dir, fhash, mentions)
+        if ner_backend != "llm":
+            del _extractor_batch
+            gc.collect()
     log(f"      {len(mentions)} mentions extraites")
+
+    # Extracteur pour les queries recall :
+    # Si backend="llm", on réutilise le même → NER unifié (plus de mismatch)
+    # Sinon, spaCy léger (~200 MB) par défaut
+    if ner_backend == "llm":
+        _query_kwargs = {"model_path": gguf_path, "verbose": verbose} if gguf_path else {}
+        extractor = EntityExtractor(backend="llm", **_query_kwargs)
+    else:
+        extractor = EntityExtractor(backend="spacy")
 
     # ── 5. Entity resolution ───────────────────────────────────────
     log("[5/10] Entity resolution …")
     resolver = EntityResolver(string_threshold=0.75)
     canonical_map = resolver.resolve(mentions)
-    # Injecter les entités canoniques dans les artefacts via artifact_ids.
-    # On exclut les entités non-discriminantes :
-    #   - trop fréquentes (> 50% des artefacts) : auteurs de conversation, salutations
-    #   - URLs : bruit pour la segmentation thématique
     n_artifacts = len(artifacts)
     art_id_to_idx = {art.id: i for i, art in enumerate(artifacts)}
     n_injected = _inject_entities(artifacts, canonical_map, art_id_to_idx, n_artifacts)
@@ -250,24 +497,18 @@ def build_pipeline(
     # ── 6. Segmentation ────────────────────────────────────────────
     log("[6/10] Segmentation épisodique …")
     seg_alpha, seg_beta = _entity_weights(n_injected)
-    segmenter = EpisodeSegmenter(
-        time_threshold_minutes=time_threshold_minutes,
-        attach_threshold=attach_threshold,
-        dormancy_minutes=dormancy_minutes,
-        hard_break_minutes=hard_break_minutes,
-        alpha=seg_alpha,
-        beta=seg_beta,
-    )
+    segmenter = _build_segmenter(seg, seg_alpha, seg_beta, embeddings, log)
     episodes = segmenter.segment(artifacts, embeddings)
     log(f"      {len(episodes)} épisodes bruts")
 
-    if consolidate:
+    if seg.consolidate:
         episodes = segmenter.consolidate(episodes)
         log(f"      → {len(episodes)} après consolidation")
 
+
     # ── 7. Splitting post-segmentation ─────────────────────────────
     log("[7/10] Splitting méga-épisodes …")
-    cfg = split_config if split_config is not None else SplitConfig()
+    cfg = split_config if split_config is not None else SplitConfig(max_span_hours=48.0)
     splitter = EpisodeSplitter(cfg)
     episodes = splitter.split(episodes, artifacts, embeddings)
     n_after = splitter.episodes_after if splitter.split_count > 0 else len(episodes)
@@ -280,8 +521,16 @@ def build_pipeline(
     log(f"      {graph.n_episodes} nœuds épisodes, {graph.n_entities} entités")
 
     # ── 9. Summaries ───────────────────────────────────────────────
-    log("[9/10] Summarization …")
-    summarizer = EpisodeSummarizer(entity_first=(n_injected > 0))
+    _sum_label = "LLM abstractif (Qwen2.5)" if summarizer_backend == "llm" else "extractif (TF-IDF)"
+    log(f"[9/10] Summarization ({_sum_label}) …")
+    if summarizer_backend == "llm":
+        from llm_summarizer import create_llm_summarizer
+        summarizer = create_llm_summarizer(
+            model_path=gguf_path, verbose=verbose
+        )
+        summarizer.entity_first = (n_injected > 0)
+    else:
+        summarizer = EpisodeSummarizer(entity_first=(n_injected > 0))
     summaries_list = summarizer.summarize_all(episodes, artifacts, embeddings)
     summary_map = attach_summaries(episodes, summaries_list)
     log(f"      {len(summaries_list)} résumés générés")
@@ -474,7 +723,7 @@ def ingest(
 
     # ── 1. Embedding ─────────────────────────────────────────────────
     emb = embed_texts([artifact.content])[0].astype(np.float32)
-    log(f"embed OK")
+    log("embed OK")
 
     # ── 2. Entités ───────────────────────────────────────────────────
     _ingest_entities(artifact, state.get("extractor"))
@@ -557,15 +806,19 @@ def _create_episode(artifact: Artifact, emb: np.ndarray, episodes: list):
         centroid_init = emb.copy(),
         time_interval = (artifact.timestamp, artifact.timestamp),
         memory_score  = 1.0,
-        entity_weights= {ent: 1.0 for ent in artifact.entities},
+        entity_weights= dict.fromkeys(artifact.entities, 1.0),
     )
     episodes.append(ep)
     return ep
 
 
 def _update_episode_ema(ep, artifact: Artifact, emb: np.ndarray,
-                         alpha: float = 0.15) -> None:
-    """Met à jour centroïde (EMA), intervalle temporel et entités."""
+                         alpha: float = 0.80) -> None:
+    """Met à jour centroïde (EMA), intervalle temporel et entités.
+
+    alpha=0.80 : cohérent avec EpisodeSegmenter.ema_alpha (valeur Optuna-validée).
+    Le centroïde reflète le contexte récent — logique pour l'attachement de nouveaux messages.
+    """
     ep.centroid = (1 - alpha) * ep.centroid + alpha * emb
     ep.centroid /= np.linalg.norm(ep.centroid) + 1e-9
     t0 = ep.time_interval[0] if ep.time_interval else artifact.timestamp
